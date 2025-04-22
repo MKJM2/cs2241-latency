@@ -2,7 +2,7 @@ import math
 import xxhash
 import struct # For integer serialization
 from bitarray import bitarray
-from typing import List, Final, Tuple, Callable # Added Tuple, Callable
+from typing import List, Final, Tuple, Callable, Any
 
 # --- Constants ---
 XXH_SEED1: Final[int] = 0
@@ -159,6 +159,23 @@ class BloomFilter:
         self._add_indices(indices)
         self.num_items += 1
 
+    def add(self, item: Any) -> None:
+        """
+        Adds an item to the Bloom filter, automatically handling type conversion.
+
+        Args:
+            item: The item to add. Supported types are bytes, str, and int.
+                Strings are encoded using UTF-8 by default.
+        """
+        if isinstance(item, bytes):
+            self.add_bytes(item)
+        elif isinstance(item, str):
+            self.add_str(item)
+        elif isinstance(item, int):
+            self.add_int(item)
+        else:
+            raise TypeError(f"Unsupported type: {type(item).__name__!r}. Supported types: bytes, str, int")
+
     # --- Public Type-Specific Contains Methods ---
 
     def contains_bytes(self, item: bytes) -> bool:
@@ -212,6 +229,26 @@ class BloomFilter:
             return False # Or raise ValueError if invalid input shouldn't be checked
         indices = self._get_indices(item_bytes)
         return self._check_indices(indices)
+
+    def __contains__(self, item: Any) -> bool:
+        """
+        Checks if an item might be in the Bloom filter.
+
+        Args:
+            item: The item to check. Supported types are bytes, str, and int.
+
+        Returns:
+            True if the item is possibly in the set (may be a false positive).
+            False if the item is definitely not in the set.
+        """
+        if isinstance(item, bytes):
+            return self.contains_bytes(item)
+        elif isinstance(item, str):
+            return self.contains_str(item)
+        elif isinstance(item, int):
+            return self.contains_int(item)
+        else:
+            raise TypeError(f"Unsupported type: {type(item).__name__!r}. Supported types: bytes, str, int")
 
     # --- Other Public Methods ---
 

@@ -1,1224 +1,1245 @@
+import argparse
 import math
-import bisect
 import time
-from typing import List, Tuple, Optional, Any, Final
-
+import bisect
+from typing import (
+    Any,
+    Callable,
+    Final,
+    Generic,
+    List,
+    Optional,
+    Tuple,
+    TypeVar,
+    Dict,
+    Sequence,
+)
+import pandas as pd
+from sklearn.model_selection import train_test_split
 from bloom_filter import BloomFilter
 
-# --- Constants ---
+
+# Type variables and aliases
+KeyType = TypeVar("KeyType")
+# Define a specific type for the predictor function
+Predictor = Callable[[KeyType], float]
+
+# Constants
 EPS: Final[float] = 1e-8
-INF: Final[float] = float('inf')
+INF: Final[float] = float("inf")
 
-# --- prList Class ---
-class PrList:
-    """
-    Calculates and stores probability distributions over N segments based on scores.
-    Provides methods for accessing accumulated probabilities.
-    """
-    __slots__ = ('thre_list', 'N', 'pr', 'accPr')
 
-    def __init__(self, scores: List[float], thre_list: List[float]):
+class prList:
+    """
+    Represents a discrete probability distribution over score segments
+    defined by thresholds. Calculates segment probabilities and
+    cumulative probabilities from a list of scores.
+    """
+
+    def __init__(
+        self, scores: Sequence[float], thre_list: Sequence[float]
+    ) -> None:
         """
+        Initializes the probability list.
+
         Args:
-            scores: A list of scores (expected between 0 and 1).
-            thre_list: Thresholds dividing [0, 1] into N segments.
-                       Must start with 0.0 and end with 1.0.
+            scores (Sequence[float]): A sequence of scores (between 0 and 1).
+            thre_list (Sequence[float]): Thresholds dividing scores into segments.
+                                         Must start with 0 and end with 1, strictly increasing.
         """
-        if not (abs(thre_list[0] - 0.0) < EPS and abs(thre_list[-1] - 1.0) < EPS):
-             raise ValueError("thre_list must start with 0.0 and end with 1.0")
-        if not all(thre_list[i] <= thre_list[i+1] for i in range(len(thre_list)-1)):
-            raise ValueError("thre_list must be sorted")
+        assert thre_list[0] == 0.0, "Threshold list must start with 0.0"
+        assert thre_list[-1] == 1.0, "Threshold list must end with 1.0"
+        assert all(
+            thre_list[i] < thre_list[i + 1] for i in range(len(thre_list) - 1)
+        ), "Thresholds must be strictly increasing"
 
-        self.thre_list: Final[List[float]] = thre_list
-        self.N: Final[int] = len(thre_list) - 1
+        self.thre_list: Final[List[float]] = list(thre_list)
+        self.N: Final[int] = len(thre_list) - 1  # Number of segments
 
-        cnt_list = [0] * (self.N + 1) # 1-based indexing for segments
-        for score in scores:
-            if not (0.0 <= score <= 1.0):
-                 # Be stricter in production
-                 raise ValueError(f"Score {score} out of bounds [0, 1]")
+        cnt: List[int] = [0] * (self.N + 1)  # 1-based index for segments
+        for sc in scores:
+            assert 0.0 <= sc <= 1.0, f"Score out of bounds [0, 1]: {sc}"
 
-            # Find segment index: score > t[idx-1] and score <= t[idx]
-            segment_idx = bisect.bisect_left(thre_list, score)
-            # Handle edge case score == 0.0, place it in segment 1
-            if segment_idx == 0 and abs(score - 0.0) < EPS:
-                segment_idx = 1
-            # Handle edge case score == 1.0, place it in segment N
-            elif segment_idx > self.N and abs(score - 1.0) < EPS:
-                 segment_idx = self.N
-            # Scores exactly on a threshold go to the segment *above* it
-            elif abs(score - thre_list[segment_idx-1]) < EPS and segment_idx > 1:
-                 # If score is exactly threshold t[i], bisect_left puts it
-                 # at index i. We want it in segment i (index i).
-                 pass # Correctly placed by bisect_left
+            # Find segment index: segment `i` corresponds to (t_{i-1}, t_i]
+            # Scores equal to a threshold fall into the segment *starting* at that threshold.
+            idx: int = bisect.bisect_right(self.thre_list, sc)
 
-            if not (1 <= segment_idx <= self.N):
-                 # This shouldn't happen with the checks above, but safeguard
-                 raise RuntimeError(f"Failed to assign score {score} to segment.")
+            # Clamp index to be within [1, N]
+            # bisect_right ensures score > t[idx-1] and score <= t[idx]
+            # If score == 0.0, bisect_right gives 1 (correct).
+            # If score == 1.0, bisect_right gives N+1, needs clamping.
+            idx = max(1, min(idx, self.N))
+            cnt[idx] += 1
 
-            cnt_list[segment_idx] += 1
+        total: int = len(scores)
+        self.pr: List[float] = [0.0] * (self.N + 1)
+        self.accPr: List[float] = [0.0] * (self.N + 1)
+        if total > 0:
+            for i in range(1, self.N + 1):
+                self.pr[i] = cnt[i] / total
+                self.accPr[i] = self.accPr[i - 1] + self.pr[i]
+            # Allow for small floating point inaccuracies in sum
+            assert abs(self.accPr[self.N] - 1.0) < EPS, (
+                f"Accumulated probability is {self.accPr[self.N]}, expected ~1.0"
+            )
 
-        total_cnt = len(scores)
-        if total_cnt == 0:
-            # Handle empty input gracefully
-            self.pr = [0.0] * (self.N + 1)
-            self.accPr = [0.0] * (self.N + 1)
-            return
+    def acc_range_idx(self, l_idx: int, r_idx: int) -> float:
+        """
+        Calculates the sum of probabilities for segments from index l_idx to r_idx (inclusive).
 
-        self.pr = [0.0] * (self.N + 1)
-        self.accPr = [0.0] * (self.N + 1)
-        for i in range(1, self.N + 1):
-            self.pr[i] = cnt_list[i] / total_cnt
-            self.accPr[i] = self.accPr[i - 1] + self.pr[i]
+        Args:
+            l_idx (int): Starting segment index \in {1 ... N}.
+            r_idx (int): Ending segment index \in {1 ... N}.
 
-        # Final accumulated probability should be close to 1.0
-        if not abs(self.accPr[self.N] - 1.0) < EPS:
-             # Warn or raise depending on required precision
-             # print(f"Warning: Accumulated probability is {self.accPr[self.N]}")
-             pass
-
-
-    def _get_th_idx_from_score(self, score: float) -> int:
-        """Finds the index `i` such that `thre_list[i]` is the threshold value."""
-        # This assumes thresholds are exactly i/N, which might not hold
-        # if thre_list is arbitrary. Use bisect instead for general case.
-        # Original implementation assumed equal segments. Let's use bisect.
-        if not (0.0 <= score <= 1.0):
-            raise ValueError(f"Score {score} out of bounds [0, 1]")
-        # Find index i such that thre_list[i] >= score
-        idx = bisect.bisect_left(self.thre_list, score)
-        # If score is exactly on a threshold, bisect_left gives the index
-        # *at* or *above* it.
-        # Adjust if score is exactly 0.0
-        if idx == 0 and abs(score - 0.0) < EPS:
-            return 0
-        # If score is exactly a threshold > 0, return its index
-        if abs(score - self.thre_list[idx]) < EPS:
-             return idx
-        # Otherwise, score is between thre_list[idx-1] and thre_list[idx]
-        # The relevant threshold *index* for accumulation up to 'score'
-        # depends on how accumulation is defined. The original acc_range
-        # implies accumulation *up to* the segment containing the score.
-        # Let's stick to the original logic using indices directly.
-        # Reverting to original logic assuming fixed thresholds i/N for get_th_idx
-        # *IF* that assumption holds. If not, the original get_th_idx is flawed.
-        # Let's *assume* the thresholds ARE i/N for this specific function,
-        # as the original code likely relied on this.
-        # If thre_list can be arbitrary, this function needs rethinking or removal.
-        # Check assumption:
-        is_uniform = all(abs(self.thre_list[i] - i / self.N) < EPS for i in range(self.N + 1))
-        if not is_uniform:
-            raise NotImplementedError("PrList._get_th_idx assumes uniform thresholds (i/N)")
-
-        # Original logic assuming uniform thresholds:
-        idx = int(round(score * self.N)) # Use round for robustness near boundaries
-        # Ensure idx is within bounds [0, N]
-        idx = max(0, min(self.N, idx))
-        # Validate that the calculated index corresponds closely to the score
-        if not abs(self.thre_list[idx] - score) < EPS:
-             # This might happen if score isn't exactly i/N
-             # Fallback to bisect search for the closest threshold index
-             idx = bisect.bisect_left(self.thre_list, score + EPS) -1 # Find index below or equal
-             idx = max(0, min(self.N, idx)) # Clamp
-             # Recalculate index based on closest threshold
-             idx = bisect.bisect_left(self.thre_list, score)
-             if idx > 0 and abs(score - self.thre_list[idx-1]) < abs(score - self.thre_list[idx]):
-                 idx = idx -1
-
-
-        return idx
-
+        Returns:
+            float: Sum of self.pr[l_idx...r_idx].
+        """
+        assert 1 <= l_idx <= self.N, f"l_idx out of bounds: {l_idx}"
+        assert 1 <= r_idx <= self.N, f"r_idx out of bounds: {r_idx}"
+        assert l_idx <= r_idx, f"l_idx must be <= r_idx ({l_idx}, {r_idx})"
+        # accPr[r_idx] = sum(pr[1]...pr[r_idx])
+        # accPr[l_idx - 1] = sum(pr[1]...pr[l_idx - 1])
+        return self.accPr[r_idx] - self.accPr[l_idx - 1]
 
     def acc_range(self, score_l: float, score_r: float) -> float:
-        """Accumulated probability in (score_l, score_r]."""
-        # Use direct index calculation based on thresholds for accuracy
-        # Find index i such that thre_list[i] >= score_l
-        idx_l = bisect.bisect_left(self.thre_list, score_l)
-        # Find index j such that thre_list[j] >= score_r
-        idx_r = bisect.bisect_left(self.thre_list, score_r)
+        """
+        Calculates accumulated probability in the score range (score_l, score_r].
 
-        # If score_r is exactly on a threshold, bisect_left gives its index.
-        # accPr[idx_r] includes the probability *up to* that threshold.
-        if abs(score_r - self.thre_list[idx_r]) > EPS:
-             # score_r is within segment idx_r, so we need accPr up to idx_r-1? No.
-             # accPr[i] = sum(pr[1]...pr[i]). We want sum pr[l+1...r]
-             # where l = segment containing score_l, r = segment containing score_r
-             # This corresponds to accPr[idx_r] - accPr[idx_l] if thresholds align perfectly.
-             # Let's use the index version for clarity.
-             pass # Stick to original index logic below for now
+        Args:
+            score_l (float): Left boundary (exclusive) \in [0, 1].
+            score_r (float): Right boundary (inclusive) \in [0, 1].
+
+        Returns:
+            float: Accumulated probability Pr(score_l < score <= score_r).
+        """
+        assert 0.0 <= score_l <= 1.0
+        assert 0.0 <= score_r <= 1.0
+        assert score_l <= score_r, "score_l must be <= score_r"
 
         # Find segment indices corresponding to scores
-        # Segment i corresponds to interval ( thre_list[i-1], thre_list[i] ]
-        seg_idx_l = bisect.bisect_left(self.thre_list, score_l)
-        seg_idx_r = bisect.bisect_left(self.thre_list, score_r)
+        # We want segments *strictly greater* than score_l up to score_r
+        # Segment `i` corresponds to (t_{i-1}, t_i]
+        # Index `l` such that t_{l-1} < score_l <= t_l
+        # Index `r` such that t_{r-1} < score_r <= t_r
+        idx_l: int = bisect.bisect_right(self.thre_list, score_l)
+        idx_r: int = bisect.bisect_right(self.thre_list, score_r)
 
-        # Adjust if score is exactly on threshold
-        if seg_idx_l > 0 and abs(score_l - self.thre_list[seg_idx_l-1]) < EPS :
-             # If score_l is exactly t[i-1], it's the lower bound of segment i
-             # We want to exclude segments below i. Start accumulation from i.
-             # accPr index should be seg_idx_l - 1
-              pass # bisect_left handles this? No, need index *below* score_l
-        idx_l = bisect.bisect_right(self.thre_list, score_l) -1
-        idx_l = max(0, idx_l)
+        # We need sum from segment idx_l up to segment idx_r
+        # Clamp indices to valid segment range [1, N]
+        start_seg_idx = max(1, idx_l)
+        end_seg_idx = max(0, min(idx_r -1, self.N)) # -1 because bisect_right gives insertion point
 
+        if start_seg_idx > end_seg_idx:
+            return 0.0  # Range contains no full segments or is invalid
 
-        # If score_r is exactly t[i], bisect_left gives i. accPr[i] is correct.
-        if abs(score_r - self.thre_list[seg_idx_r]) < EPS:
-             idx_r = seg_idx_r
-        else:
-             # score_r is within segment seg_idx_r. We need up to seg_idx_r.
-             idx_r = seg_idx_r
-        idx_r = max(0, min(self.N, idx_r)) # Clamp idx_r
-
-        # Find index corresponding to score_l threshold
-        idx_l = bisect.bisect_left(self.thre_list, score_l)
-        # Find index corresponding to score_r threshold
-        idx_r = bisect.bisect_left(self.thre_list, score_r)
-        # Adjust if score_r is exactly on a threshold
-        if idx_r < len(self.thre_list) and abs(score_r - self.thre_list[idx_r]) < EPS:
-             pass # idx_r is correct
-        else:
-             # score_r falls within segment idx_r, so we need up to idx_r
-             idx_r = max(0, min(self.N, idx_r))
+        # Sum probabilities from segment start_seg_idx to end_seg_idx
+        return self.accPr[end_seg_idx] - self.accPr[start_seg_idx - 1]
 
 
-        # If score_l is exactly on a threshold, idx_l is that threshold's index.
-        # accPr[idx_l] includes probability up to segment idx_l.
-        # We want probability *strictly greater than* score_l?
-        # Original paper likely means [score_l, score_r] or similar.
-        # Let's assume [score_l, score_r] -> accPr[idx_r] - accPr[idx_l-1]? No.
-        # Let's use the index version acc_range_idx which is clearer.
-
-        # Find the segment index containing score_l (or just below if exact)
-        idx_l = bisect.bisect_right(self.thre_list, score_l) - 1
-        idx_l = max(0, idx_l) # Ensure non-negative
-
-        # Find the segment index containing score_r (or at threshold if exact)
-        idx_r = bisect.bisect_left(self.thre_list, score_r)
-         # If score_r is exactly a threshold, use that index
-        if idx_r < len(self.thre_list) and abs(score_r - self.thre_list[idx_r]) < EPS:
-             pass
-        else:
-             # Otherwise, score_r is within segment idx_r, use index idx_r
-             idx_r = max(0, min(self.N, idx_r))
-
-
-        # The probability is sum(pr[i]) for segments i where thre_list[i-1] >= score_l
-        # and thre_list[i] <= score_r. This seems overly complex.
-        # Revert to the simpler index-based logic:
-        # Find index i such that thre_list[i] is the first threshold >= score_l
-        _idx_l_lookup = bisect.bisect_left(self.thre_list, score_l)
-        # Find index j such that thre_list[j] is the first threshold >= score_r
-        _idx_r_lookup = bisect.bisect_left(self.thre_list, score_r)
-
-        # If score_r is exactly on threshold j, we want accPr[j]
-        # If score_r is between j-1 and j, we still want accPr[j]? Check definition.
-        # Let's assume accPr[i] = sum P(segment 1..i)
-        # We want sum P(segment l..r) where segment l contains score_l and r contains score_r
-        # This is accPr[r] - accPr[l-1]
-
-        # Find segment index l for score_l
-        L = bisect.bisect_left(self.thre_list, score_l)
-        if L == 0 and abs(score_l - 0.0) < EPS:
-            L = 1 # score 0 is segment 1
-        elif abs(score_l - self.thre_list[L-1]) < EPS and L > 1:
-            pass # exact threshold, belongs to segment l
-
-        # Find segment index r for score_r
-        R = bisect.bisect_left(self.thre_list, score_r)
-        if R > self.N and abs(score_r - 1.0) < EPS :
-            R = self.N # score 1 is segment N
-        elif abs(score_r - self.thre_list[R-1]) < EPS and R > 1:
-            pass # exact threshold, belongs to segment r
-
-        # Clamp indices
-        L = max(1, min(self.N, L))
-        R = max(1, min(self.N, R))
-
-        if R < L:
-            return 0.0 # Handle empty range
-
-        # Probability = sum(pr[l...r]) = accPr[r] - accPr[l-1]
-        return self.accPr[R] - self.accPr[L - 1]
-
-
-    def acc_range_idx(self, idx_l: int, idx_r: int) -> float:
-        """Accumulated probability for segments idx_l through idx_r (inclusive)."""
-        if not (1 <= idx_l <= self.N):
-             raise IndexError(f"idx_l {idx_l} out of bounds [1, {self.N}]")
-        if not (1 <= idx_r <= self.N):
-             raise IndexError(f"idx_r {idx_r} out of bounds [1, {self.N}]")
-        if idx_r < idx_l:
-            return 0.0 # Empty range
-
-        return self.accPr[idx_r] - self.accPr[idx_l - 1]
-
-# --- DPKL Calculation ---
-def calc_DPKL(g: PrList, h: PrList, k: int, j: Optional[int] = None) -> Tuple[List[List[float]], List[List[Optional[int]]]]:
+def matrix_problem_on_monotone_matrix(
+    f: Callable[[int, int], float], n: int, m: int
+) -> List[Optional[int]]:
     """
-    Calculates Dynamic Programming table for KL divergence maximization.
+    Solves the rows maxima problem for a totally monotone n x m matrix B.
+    Finds the smallest column index j for each row i such that B[i, j] is maximal.
+    Uses the SMAWK algorithm principle (recursive divide and conquer). Assumes
+    1-based indexing for the matrix B via function f.
 
     Args:
-        g: PrList for positive keys.
-        h: PrList for negative keys.
-        k: Number of regions.
-        j: Optional upper bound for segments considered (defaults to N).
+        f (Callable[[int, int], float]): Function returning B[i, j] (1-based i, j).
+        n (int): Number of rows.
+        m (int): Number of columns.
 
     Returns:
-        Tuple (DPKL, DPPre):
-            DPKL[n][q]: Max KL divergence using segments 1..n into q regions.
-            DPPre[n][q]: Predecessor segment index (n') for the optimal solution
-                         ending at segment n with q regions. The last region
-                         spans segments n'+1 to n.
+        List[Optional[int]]: 1-indexed list `a` where `a[i]` is the smallest
+                             column index `j` maximizing `f(i, j)`. `a[0]` is None.
     """
-    N = g.N
-    if h.N != N:
-        raise ValueError("g and h PrLists must have the same N")
-    if j is None:
-        j = N
-    if not (1 <= j <= N):
-        raise ValueError(f"Segment upper bound j={j} out of range [1, {N}]")
+    a: List[Optional[int]] = [None] * (n + 1)  # 1-based result array
 
-    # DPKL[n][q]: max KL divergence using segments 1..n into q regions
-    DPKL: List[List[float]] = [[-INF] * (k + 1) for _ in range(j + 1)]
-    # DPPre[n][q]: index i-1 such that clustering segments i..n as region q yields max DPKL[n][q]
-    DPPre: List[List[Optional[int]]] = [[None] * (k + 1) for _ in range(j + 1)]
+    def calc_j(row_idx: int, col_start: int, col_end: int) -> int:
+        """Finds the best column index for a given row in a specified range."""
+        max_val: float = -INF
+        argmax_col: int = col_start
+        for col_idx in range(col_start, col_end + 1):
+            val: float = f(row_idx, col_idx)
+            # Use > for smallest index in case of ties
+            if val > max_val:
+                max_val = val
+                argmax_col = col_idx
+        return argmax_col
 
-    DPKL[0][0] = 0.0 # Base case: 0 segments, 0 regions, 0 divergence
+    def rec_solve(
+        row_start: int, row_end: int, col_start: int, col_end: int
+    ) -> None:
+        """Recursive step of the algorithm."""
+        if row_start > row_end:
+            return
 
-    for q_reg in range(1, k + 1): # Number of regions
-        for n_seg in range(1, j + 1): # Ending segment index
-            max_kl = -INF
-            best_predecessor_idx = None
-            # Iterate through possible start segments 'i_seg' for the q_reg-th region
-            for i_seg in range(1, n_seg + 1):
-                # Region q_reg covers segments i_seg to n_seg
-                pos_pr = g.acc_range_idx(i_seg, n_seg)
-                neg_pr = h.acc_range_idx(i_seg, n_seg)
+        mid_row: int = (row_start + row_end) // 2
+        best_col_for_mid: int = calc_j(mid_row, col_start, col_end)
+        a[mid_row] = best_col_for_mid
 
-                current_kl_term = 0.0
-                if neg_pr > EPS: # Avoid division by zero and log(0)
-                    if pos_pr > EPS:
-                        current_kl_term = pos_pr * math.log(pos_pr / neg_pr)
-                    # else: pos_pr is 0, term is 0
-                elif pos_pr > EPS:
-                    # Positive probability but zero negative probability -> infinite KL divergence?
-                    # The paper likely assumes neg_pr > 0 for regions considered.
-                    # Or handle this case specifically. Let's treat as INF contribution.
-                    # However, the original code continues if Neg==0. Let's match that.
-                     continue # Skip if neg_pr is 0, cannot form KL term meaningfully here
+        # Recurse on the top-left quadrant (rows < mid, cols <= best_col)
+        rec_solve(row_start, mid_row - 1, col_start, best_col_for_mid)
+        # Recurse on the bottom-right quadrant (rows > mid, cols >= best_col)
+        rec_solve(mid_row + 1, row_end, best_col_for_mid, col_end)
 
-                # Predecessor state: segments 1..(i_seg-1) using q_reg-1 regions
-                predecessor_kl = DPKL[i_seg - 1][q_reg - 1]
+    rec_solve(1, n, 1, m)
+    return a
 
-                if predecessor_kl > -INF: # Check if predecessor state is reachable
-                    total_kl = predecessor_kl + current_kl_term
-                    if total_kl > max_kl:
-                        max_kl = total_kl
-                        best_predecessor_idx = i_seg - 1 # Store index before start segment
 
-            DPKL[n_seg][q_reg] = max_kl
-            DPPre[n_seg][q_reg] = best_predecessor_idx
+def calc_DPKL(
+    g: prList, h: prList, k: int, j_max: Optional[int] = None
+) -> Tuple[List[List[float]], List[List[Optional[int]]]]:
+    """
+    Calculates DPKL table using standard dynamic programming O(N^2 * k).
+    DPKL[n][q] = max_{1 <= i <= n} ( DPKL[i-1][q-1] + dkl(i, n) )
+    where dkl(i, n) is the KL divergence contribution for segment [i, n].
+
+    Args:
+        g (prList): Key probability distribution over segments.
+        h (prList): Non-key probability distribution over segments.
+        k (int): Number of regions (partitions).
+        j_max (Optional[int]): Optional upper bound for segments considered (default: N).
+
+    Returns:
+        Tuple[List[List[float]], List[List[Optional[int]]]]:
+            DPKL table (max DKL sum), DPPredecessor table (optimal previous index).
+            Both tables are (N+1)x(k+1) or (j_max+1)x(k+1), 0-indexed.
+    """
+    N: int = g.N
+    if j_max is None:
+        j_max = N
+    assert h.N == N, "g and h must have the same number of segments (N)"
+    assert 1 <= k <= N, "Number of regions k must be between 1 and N"
+    assert 1 <= j_max <= N, "j_max must be between 1 and N"
+
+    # DPKL[n][q]: max DKL sum using q regions up to segment n
+    # DPPre[n][q]: the end index (i-1) of the (q-1)-th region for the optimal solution ending at n with q regions.
+    DPKL: List[List[float]] = [
+        [-INF] * (k + 1) for _ in range(j_max + 1)
+    ]
+    DPPre: List[List[Optional[int]]] = [
+        [None] * (k + 1) for _ in range(j_max + 1)
+    ]
+    DPKL[0][0] = 0.0  # Base case: 0 regions, 0 segments -> 0 DKL
+
+    for q in range(1, k + 1):  # Iterate through number of regions
+        for n in range(1, j_max + 1):  # Iterate through ending segment index
+            max_dpkl_val: float = -INF
+            best_predecessor: Optional[int] = None
+            # Iterate through possible start segments `i` for the q-th region [i, n]
+            for i in range(1, n + 1):
+                # Check if the previous state DPKL[i-1][q-1] is reachable
+                if DPKL[i - 1][q - 1] == -INF:
+                    continue
+
+                # Calculate KL divergence contribution for segments i to n
+                Pos: float = g.acc_range_idx(i, n)
+                Neg: float = h.acc_range_idx(i, n)
+
+                dkl_term: float
+                if Neg == 0.0:
+                    # If no non-keys, KL div is infinite if keys exist, 0 otherwise
+                    if Pos > EPS:
+                        continue  # Effectively -INF DPKL, skip this split
+                    else:
+                        dkl_term = 0.0
+                elif Pos == 0.0:
+                    # If no keys, KL div contribution is 0
+                    dkl_term = 0.0
+                else:
+                    # Standard KL divergence term: Pos * log(Pos / Neg)
+                    # Use natural log as in the reference code
+                    dkl_term = Pos * math.log(Pos / Neg)
+
+                current_sum: float = DPKL[i - 1][q - 1] + dkl_term
+
+                if current_sum > max_dpkl_val:
+                    max_dpkl_val = current_sum
+                    # Store the end index of the previous region (q-1)
+                    best_predecessor = i - 1
+
+            DPKL[n][q] = max_dpkl_val
+            DPPre[n][q] = best_predecessor
 
     return DPKL, DPPre
 
 
-# --- Threshold Reconstruction ---
-def ThresMaxDiv(DPPre: List[List[Optional[int]]], j: int, k: int, thre_list: List[float]) -> Optional[List[float]]:
+def fast_calc_DPKL(
+    g: prList, h: prList, k: int
+) -> Tuple[List[List[float]], List[List[Optional[int]]]]:
     """
-    Reconstructs the optimal region thresholds from the DPPre table.
+    Calculates DPKL table using the faster O(N * k * logN) approach
+    leveraging the total monotonicity property of the underlying matrix problem.
 
     Args:
-        DPPre: DP predecessor table from calc_DPKL.
-        j: The final segment index considered for the k-th region (e.g., N).
-        k: Total number of regions.
-        thre_list: The list of segment boundaries (0.0 to 1.0).
+        g (prList): Key probability distribution.
+        h (prList): Non-key probability distribution.
+        k (int): Number of regions.
 
     Returns:
-        List of k+1 threshold boundaries [t_0, t_1, ..., t_k], or None if no
-        valid partitioning exists.
+        Tuple[List[List[float]], List[List[Optional[int]]]]: DPKL table, DPPredecessor table.
     """
-    N = len(thre_list) - 1
-    if N <= 0:
-        return None
-    if k <= 0:
-        return None
-    if j <= 0 and k > 0:
-        return None
-    if j >= len(DPPre) or k >= len(DPPre[0]):
-        return None # Bounds check
+    N: int = g.N
+    assert h.N == N, "g and h must have the same number of segments (N)"
+    assert 1 <= k <= N
 
-    # Start backtracking from the state (j, k)
-    # Note: Original code used DPPre[j-1][k-1] - check indexing carefully.
-    # DPPre[n][q] stores predecessor for state ending at segment n with q regions.
-    # If the last region ends at segment j, we look at DPPre[j][k].
-    current_seg_idx = j
-    thresholds_rev = [thre_list[j]] # t_k = threshold of last segment considered
+    DPKL: List[List[float]] = [[-INF] * (k + 1) for _ in range(N + 1)]
+    DPPre: List[List[Optional[int]]] = [
+        [None] * (k + 1) for _ in range(N + 1)
+    ]
+    DPKL[0][0] = 0.0  # Base case
 
-    for q_reg in range(k, 0, -1): # Iterate regions backwards from k down to 1
-        if current_seg_idx < 0 or DPPre[current_seg_idx][q_reg] is None:
-            return None # Invalid path or unreachable state
+    for q in range(1, k + 1):  # Iterate through number of regions
+        # Define the function A(p, i) for the monotone matrix problem
+        # A[p, i] corresponds to the DPKL value if the q-th region starts at i and ends at p
+        # A[p, i] = DPKL[i-1][q-1] + dkl(i, p)
+        # Note: matrix_problem_on_monotone_matrix uses 1-based indexing for p and i
+        def func_A(p: int, i: int) -> float:
+            """
+            Calculates the potential DPKL value for row p, column i (1-based).
+            p: end segment index (1 to N)
+            i: start segment index (1 to N)
+            """
+            # The q-th region must start at or before it ends (i <= p)
+            if i > p:
+                return -INF
+            # The previous state DPKL[i-1][q-1] must be valid (reachable)
+            if DPKL[i - 1][q - 1] == -INF:
+                return -INF
 
-        predecessor_idx = DPPre[current_seg_idx][q_reg]
-        # predecessor_idx is the index of the last segment of the *previous* region (q-1)
-        # The threshold is thre_list[predecessor_idx]
-        thresholds_rev.append(thre_list[predecessor_idx])
-        current_seg_idx = predecessor_idx # Move to the end of the previous region
+            Pos: float = g.acc_range_idx(i, p)
+            Neg: float = h.acc_range_idx(i, p)
 
-    # The last threshold added corresponds to t_0, which should be 0.0
-    if not abs(thresholds_rev[-1] - 0.0) < EPS:
-         # This might indicate an issue if the path doesn't trace back to index 0
-         # print(f"Warning: Backtracking did not end at threshold 0.0 (ended at {thresholds_rev[-1]})")
-         pass # Allow for now, maybe valid paths don't always start perfectly at 0?
+            dkl_term: float
+            if Neg == 0.0:
+                if Pos > EPS:
+                    return -INF  # Infinite KL divergence
+                else:
+                    dkl_term = 0.0
+            elif Pos == 0.0:
+                dkl_term = 0.0
+            else:
+                dkl_term = Pos * math.log(Pos / Neg)
 
-    # Reverse to get [t_0, t_1, ..., t_k]
-    thresholds = list(reversed(thresholds_rev))
+            return DPKL[i - 1][q - 1] + dkl_term
 
-    if len(thresholds) != k + 1:
-        # print(f"Warning: Expected {k+1} thresholds, got {len(thresholds)}")
-        return None # Or handle error
+        # Solve the row maxima problem for the implicitly defined N x N matrix A
+        # max_args[p] will give the optimal starting segment index `i` (1-based)
+        # for the q-th region ending at segment p (1-based).
+        max_args: List[Optional[int]] = matrix_problem_on_monotone_matrix(
+            func_A, N, N
+        )
 
-    # Add t_k = 1.0 if it wasn't the last segment boundary j
-    # The logic implies t_k is the upper bound of the score range considered.
-    # If j=N, then thre_list[j] is 1.0. If j<N, what should t_k be?
-    # The paper implies partitioning the *entire* [0,1] range.
-    # Let's assume j=N always for the final call.
-    # The original code iterates j from k to N, implying the last region
-    # might end before segment N. Let's adjust ThresMaxDiv to match MaxDivDP.
+        # Update DPKL and DPPre tables using the optimal starting points found
+        for n in range(1, N + 1):  # n is the ending segment index (1-based)
+            optimal_start_idx: Optional[int] = max_args[n]  # Optimal 'i'
+            if optimal_start_idx is None:
+                # This row (ending segment n) might be unreachable
+                continue
 
-    # --- Re-aligning ThresMaxDiv with MaxDivDP logic ---
-    # MaxDivDP calculates DPKL[N][k] and DPPre[N][k]
-    # We trace back from DPPre[N][k]
+            # Recalculate the value using the optimal start index to store in DPKL
+            dpkl_value: float = func_A(n, optimal_start_idx)
+            DPKL[n][q] = dpkl_value
+            # Store the end index of the *previous* region (optimal_start_idx - 1)
+            DPPre[n][q] = optimal_start_idx - 1
 
-    current_seg_idx = N # Start from the end, segment N
-    thresholds_rev = [thre_list[N]] # t_k = 1.0
-
-    for q_reg in range(k, 0, -1):
-        if current_seg_idx < 0:
-            return None # Should not happen if DP table is correct
-        predecessor_idx = DPPre[current_seg_idx][q_reg]
-        if predecessor_idx is None:
-            return None # No valid path
-
-        thresholds_rev.append(thre_list[predecessor_idx])
-        current_seg_idx = predecessor_idx
-
-    if not abs(thresholds_rev[-1] - 0.0) < EPS:
-        return None # Must trace back to 0
-
-    thresholds = list(reversed(thresholds_rev))
-    if len(thresholds) != k + 1:
-        return None
-
-    return thresholds
+    return DPKL, DPPre
 
 
-# --- Optimal FPR Calculation (Target Overall FPR F) ---
-def OptimalFPR(g: PrList, h: PrList, t: List[float], F: float, k: int) -> Optional[List[Optional[float]]]:
+def MaxDivDP(
+    g: prList, h: prList, N: int, k: int
+) -> Tuple[List[List[float]], List[List[Optional[int]]]]:
     """
-    Calculates optimal FPR f_i for each region to achieve target overall FPR F,
-    minimizing memory usage implicitly (related to KL divergence).
+    Wrapper function to calculate DPKL using the standard DP method.
+    (Provided for compatibility with the original PLBF class structure).
 
     Args:
-        g: PrList for positive keys.
-        h: PrList for negative keys.
-        t: List of k+1 region threshold boundaries [t_0, ..., t_k].
-        F: Target overall FPR (0 < F < 1).
-        k: Number of regions.
+        g (prList): Key density.
+        h (prList): Non-key density.
+        N (int): Number of segments (should match g.N).
+        k (int): Number of regions.
 
     Returns:
-        List of k+1 FPRs [None, f_1, ..., f_k], where f_i is the FPR for region i.
-        Returns None if calculation fails or F is unachievable.
+        Tuple[list[list[float]], list[list[int]]]: DPKL, DPPre tables.
     """
-    if not (0 < F < 1):
-        raise ValueError("Target FPR F must be between 0 and 1")
+    assert g.N == N, "N parameter does not match g.N"
+    return calc_DPKL(g, h, k)
+
+
+def fastMaxDivDP(
+    g: prList, h: prList, N: int, k: int
+) -> Tuple[List[List[float]], List[List[Optional[int]]]]:
+    """
+    Wrapper function to calculate DPKL using the fast (monotone matrix) method.
+
+    Args:
+        g (prList): Key density.
+        h (prList): Non-key density.
+        N (int): Number of segments (should match g.N).
+        k (int): Number of regions.
+
+    Returns:
+        Tuple[list[list[float]], list[list[int]]]: DPKL, DPPre tables.
+    """
+    assert g.N == N, "N parameter does not match g.N"
+    return fast_calc_DPKL(g, h, k)
+
+
+def ThresMaxDiv(
+    DPPre: List[List[Optional[int]]],
+    end_segment_plus1: int,
+    k: int,
+    segment_thre_list: Sequence[float],
+) -> Optional[List[float]]:
+    """
+    Reconstructs the optimal threshold boundaries `t` by backtracking through
+    the DPPre table. Finds thresholds for `k` regions ending at segment `end_segment_plus1 - 1`.
+
+    Args:
+        DPPre (List[List[Optional[int]]]): DP Predecessor table (0-indexed).
+        end_segment_plus1 (int): The index *after* the last segment included
+                                 in the k regions (e.g., if regions cover 1..N, this is N+1).
+        k (int): Number of regions.
+        segment_thre_list (Sequence[float]): The list of segment thresholds (0..N).
+
+    Returns:
+        Optional[List[float]]: Optimal threshold boundaries `t` (length k+1),
+                               or None if no valid path exists. `t` includes 0.0 and 1.0.
+    """
+    end_segment_idx: int = end_segment_plus1 - 1  # Last segment index included
+
+    # Check if the starting state for backtracking is valid
+    if (
+        end_segment_idx < 0
+        or k <= 0
+        or end_segment_idx >= len(DPPre)
+        or k >= len(DPPre[0])
+        or DPPre[end_segment_idx][k] is None
+    ):
+        return None  # Invalid starting state or no path found
+
+    # Backtrack to find the boundaries
+    # `t` will store [t_0, t_1, ..., t_k] where t_0=0, t_k=1
+    reversed_t: List[float] = [1.0]  # Last boundary is always 1.0
+
+    current_end_idx: int = end_segment_idx
+    # Add boundary t_{k-1} which is the threshold at the end of segment current_end_idx
+    # Note: segment_thre_list[i] is the threshold *after* segment i.
+    # So, segment_thre_list[current_end_idx] is the correct boundary.
+    reversed_t.append(segment_thre_list[current_end_idx])
+
+    # Trace back from region k down to region 1
+    for reg_idx in reversed(range(1, k)):  # reg_idx goes from k-1 down to 1
+        # Find where the previous region (reg_idx) ended.
+        # This is stored in DPPre[current_end_idx][reg_idx + 1]
+        prev_end_idx: Optional[int] = DPPre[current_end_idx][reg_idx + 1]
+        if prev_end_idx is None:
+            return None  # Invalid path during backtracking
+
+        # Add the threshold at the end of the previous region
+        reversed_t.append(segment_thre_list[prev_end_idx])
+        current_end_idx = prev_end_idx
+
+    # After the loop, current_end_idx is the end index of region 0 (which is index 0).
+    # The first boundary t_0 should be 0.0.
+    # Check if the path correctly leads back to the start DPKL[0][0]
+    # The predecessor for the first region ending at current_end_idx should be 0.
+    if DPPre[current_end_idx][1] != 0:
+         # This might indicate an issue if the first region didn't start correctly.
+         # However, the DP logic should handle this. If we reached here, path is likely valid.
+         pass
+
+    reversed_t.append(0.0)  # Add the first boundary t_0 = 0.0
+    t: List[float] = list(reversed(reversed_t))
+
+    # Expected length is k+1 boundaries for k regions.
     if len(t) != k + 1:
-        raise ValueError("Threshold list length must be k+1")
+        # This could happen if the optimal solution effectively uses fewer than k regions,
+        # or if backtracking logic has an issue. Return None for safety.
+        print(
+            f"Warning: Unexpected threshold list length {len(t)} for k={k}."
+            f" Path: {t}"
+        )
+        return None
 
-    pos_pr_list = [g.acc_range(t[i - 1], t[i]) for i in range(1, k + 1)]
-    neg_pr_list = [h.acc_range(t[i - 1], t[i]) for i in range(1, k + 1)]
+    # Final check for monotonicity (should hold if DPPre is correct)
+    assert all(
+        t[i] <= t[i + 1] for i in range(len(t) - 1)
+    ), "Thresholds not monotonic after backtracking"
 
-    # Validate probabilities sum approximately to 1
-    if not abs(sum(pos_pr_list) - 1.0) < EPS:
-        print(f"Warning: Sum of pos_pr != 1 ({sum(pos_pr_list)})")
-    if not abs(sum(neg_pr_list) - 1.0) < EPS:
-        print(f"Warning: Sum of neg_pr != 1 ({sum(neg_pr_list)})")
+    return t
 
-    # Identify regions where neg_pr is effectively zero (cannot contribute to FPR)
-    # Also identify regions where pos_pr is zero (no elements, FPR is irrelevant but often set to 1)
-    valid_list = [True] * k # Regions where optimization applies
-    opt_fpr_list = [0.0] * k # Initialize FPRs (0-indexed for now)
 
+def OptimalFPR(
+    g: prList, h: prList, t: List[float], F: float, k: int
+) -> List[Optional[float]]:
+    """
+    Calculates the optimal False Positive Rates (FPRs) `f` for each region
+    defined by thresholds `t`, given a target overall FPR `F`.
+    Uses the method from the paper (Equation 7 / Algorithm 3).
+
+    Args:
+        g (prList): Key probability distribution.
+        h (prList): Non-key probability distribution.
+        t (List[float]): Threshold boundaries of each region (length k+1).
+                           t = [t_0, t_1, ..., t_k] where t_0=0, t_k=1.
+        F (float): Target overall FPR (must be > 0 and < 1).
+        k (int): Number of regions.
+
+    Returns:
+        List[Optional[float]]: Optimal FPRs `f` for each region (1-indexed, f[0]=None).
+                               Length k+1. Returns None for regions where FPR is undefined
+                               or calculation fails.
+    """
+    assert len(t) == k + 1, "Threshold list length must be k+1"
+    assert 0 < F < 1, "Target FPR F must be between 0 and 1"
+
+    # Calculate positive (key) and negative (non-key) probabilities per region
+    # Region i corresponds to interval (t[i-1], t[i]]
+    pos_pr_list: List[float] = [
+        g.acc_range(t[i - 1], t[i]) for i in range(1, k + 1)
+    ]
+    neg_pr_list: List[float] = [
+        h.acc_range(t[i - 1], t[i]) for i in range(1, k + 1)
+    ]
+
+    # Check if probabilities sum correctly (within tolerance)
+    assert abs(sum(pos_pr_list) - 1.0) < EPS, (
+        f"Sum of pos_pr != 1: {sum(pos_pr_list)}"
+    )
+    # Sum of neg_pr might not be 1 if h represents a subset (e.g., training negatives)
+
+    # Initialize validity: a region is invalid if it has zero non-key probability
+    # (cannot contribute to FPR calculation meaningfully) or if forced to f=1.
+    # Use 0-based indexing internally for easier list manipulation.
+    valid_list: List[bool] = [True] * k
     for i in range(k):
-        if neg_pr_list[i] < EPS:
+        if neg_pr_list[i] < EPS:  # Treat near-zero as zero
             valid_list[i] = False
-            # If neg_pr is 0, this region *must* have f_i = 0 to meet target F,
-            # unless pos_pr is also 0. If pos_pr > 0 and neg_pr = 0, F is unachievable?
-            # The paper's formula implies f_i -> infinity, but practically f_i=1?
-            # Let's assume if neg_pr=0, this region doesn't contribute to FPR sum.
-            # What should its f_i be? If pos_pr > 0, filter is needed.
-            # If pos_pr=0, filter is not needed.
-            # Original code seems to handle this in the iterative loop.
-            opt_fpr_list[i] = 1.0 # Tentatively set to 1 if invalid? Or 0? Let loop decide.
 
-    # Iteratively adjust FPRs for regions where calculated f_i > 1
+    opt_fpr_list: List[float] = [0.0] * k  # 0-indexed temporary list
+
+    # Iteratively determine optimal FPRs, handling cases where calculated FPR > 1
     while True:
-        valid_pos_pr_sum = sum(pos_pr_list[i] for i in range(k) if valid_list[i])
-        valid_neg_pr_sum = sum(neg_pr_list[i] for i in range(k) if valid_list[i])
-        # FPR contribution from invalid regions (where f_i is fixed, usually to 1)
-        invalid_neg_pr_sum = sum(neg_pr_list[i] * opt_fpr_list[i] for i in range(k) if not valid_list[i])
+        valid_pos_pr_sum: float = 0.0
+        valid_neg_pr_sum: float = 0.0
+        # Sum of neg_pr for regions forced to FPR=1 (or originally neg_pr=0)
+        invalid_neg_pr_sum: float = 0.0
 
-        # Target FPR for the *valid* regions
+        for i in range(k):
+            if valid_list[i]:
+                valid_pos_pr_sum += pos_pr_list[i]
+                valid_neg_pr_sum += neg_pr_list[i]
+            else:
+                # If invalid (neg_pr=0 or forced f=1), its contribution to overall F
+                # is neg_pr[i] * 1.0 (if f=1) or 0 (if neg_pr=0).
+                # This sum is used to adjust the target F for remaining valid regions.
+                invalid_neg_pr_sum += neg_pr_list[i] # Adds 0 if neg_pr was 0
+
+        # Check for edge cases where calculation is impossible or trivial
         if valid_neg_pr_sum < EPS:
-             # No negative samples in valid regions.
-             if F < invalid_neg_pr_sum - EPS:
-                 # Target F already exceeded by invalid regions
-                 # print("Warning: Target FPR F unachievable due to fixed FPRs in invalid regions.")
-                 return None # Cannot achieve target F
-             # Otherwise, all valid regions can have f_i = 0?
-             normed_F = 0.0 # Aim for zero FPR in valid regions
-        else:
-            normed_F = (F - invalid_neg_pr_sum) / valid_neg_pr_sum
-            # Clamp normed_F to be non-negative
-            normed_F = max(0.0, normed_F)
-
-
-        if valid_pos_pr_sum < EPS:
-            # No positive samples in valid regions. Any FPR is achievable?
-            # Set f_i = 0 for valid regions?
+            # All remaining regions have neg_pr=0. Cannot satisfy target F unless
+            # F is already met by the invalid regions. Set remaining FPRs to 0.
             for i in range(k):
                 if valid_list[i]:
                     opt_fpr_list[i] = 0.0
-            break # Finished
+                else:
+                    # Keep forced/original invalid as 1.0
+                    opt_fpr_list[i] = 1.0
+            break  # Exit loop
 
-        # Calculate lambda (Lagrange multiplier, related to normed_F and probabilities)
-        # The formula derived is f_i = lambda * pos_pr_i / neg_pr_i
-        # Sum(neg_pr_i * f_i) = F' => Sum(neg_pr_i * lambda * pos_pr_i / neg_pr_i) = F'
-        # lambda * Sum(pos_pr_i) = F' => lambda = F' / Sum(pos_pr_i)
-        lambda_multiplier = normed_F / valid_pos_pr_sum if valid_pos_pr_sum > EPS else 0
+        if valid_pos_pr_sum < EPS:
+            # All remaining valid regions have pos_pr=0. Set their FPR to 0.
+            # This might happen if F is very low.
+            for i in range(k):
+                if valid_list[i]:
+                    opt_fpr_list[i] = 0.0
+                else:
+                    opt_fpr_list[i] = 1.0
+            break # Exit loop
 
-        # Update FPRs for valid regions
-        changed = False
+        # Calculate the proportionality constant C based on adjusted target FPR
+        # F = sum(f_i * neg_pr_i) = sum_{valid} f_i*neg_pr_i + sum_{invalid} 1*neg_pr_i
+        # F - invalid_neg_pr_sum = sum_{valid} f_i*neg_pr_i
+        # Let f_i = C * pos_pr_i / neg_pr_i for valid i
+        # F - invalid_neg_pr_sum = sum_{valid} (C * pos_pr_i / neg_pr_i) * neg_pr_i
+        # F - invalid_neg_pr_sum = C * sum_{valid} pos_pr_i
+        # C = (F - invalid_neg_pr_sum) / sum_{valid} pos_pr_i
+        adjusted_F: float = F - invalid_neg_pr_sum
+        if adjusted_F < 0:
+             # Target F is unachievable even with f=0 for all valid regions.
+             # Set all valid region FPRs to 0 and proceed.
+             print(f"Warning: Target FPR F={F} is too low to be achieved. "
+                   f"Setting remaining valid FPRs to 0.")
+             for i in range(k):
+                 if valid_list[i]:
+                     opt_fpr_list[i] = 0.0
+                 else:
+                     opt_fpr_list[i] = 1.0
+             break # Exit loop
+
+        constant_C: float = adjusted_F / valid_pos_pr_sum
+
+        # Calculate optimal FPRs for currently valid regions
+        changed_in_iteration: bool = False
         for i in range(k):
             if valid_list[i]:
-                if neg_pr_list[i] > EPS:
-                    # Calculate ideal f_i based on lambda (or directly using normed_F)
-                    # Formula from paper seems to be f_i = normed_F * (pos_pr_i / valid_pos_pr_sum) / (neg_pr_i / valid_neg_pr_sum)
-                    # Simplified: f_i = lambda * pos_pr_i / neg_pr_i
-                    new_f_i = lambda_multiplier * pos_pr_list[i] / neg_pr_list[i]
-                    # Original code used: normed_F * n_pos_pr / n_neg_pr where n_ are normed probs
-                    # Let's re-derive: target Sum(h_i * f_i) = F' over valid i
-                    # Minimize Sum(g_i * log(1/f_i)) subject to Sum(h_i * f_i) = F'
-                    # Lagrangian: L = Sum(g_i * log(1/f_i)) - lambda * (Sum(h_i * f_i) - F')
-                    # dL/df_i = -g_i / f_i - lambda * h_i = 0 => f_i = -g_i / (lambda * h_i)
-                    # This lambda seems different. Let's use the structure from the original code.
+                # Check for division by zero (should be caught by valid_neg_pr_sum check)
+                if neg_pr_list[i] < EPS:
+                    # This case should technically be handled by initial valid_list setting
+                    # If reached, force to 1.0 and invalidate.
+                    opt_fpr_list[i] = 1.0
+                    valid_list[i] = False
+                    changed_in_iteration = True
+                    continue
 
-                    normed_pos_pr = pos_pr_list[i] / valid_pos_pr_sum if valid_pos_pr_sum > EPS else 0
-                    normed_neg_pr = neg_pr_list[i] / valid_neg_pr_sum if valid_neg_pr_sum > EPS else 0
+                fpr_i: float = constant_C * pos_pr_list[i] / neg_pr_list[i]
 
-                    if normed_neg_pr < EPS:
-                         # Cannot achieve target F if normed_pos > 0?
-                         # This case means pos_pr > 0, neg_pr > 0, but neg_pr_sum is 0? Impossible.
-                         # This means neg_pr_i is 0, should have been caught earlier.
-                         # Let's assume normed_neg_pr > EPS if valid_list[i] is True.
-                         new_f_i = 1.0 # Or INF? Set to 1.0 for safety.
-                    else:
-                         new_f_i = normed_F * normed_pos_pr / normed_neg_pr
+                # Check if calculated FPR needs clamping
+                if fpr_i >= 1.0 - EPS:  # Clamp FPR >= 1 to 1
+                    opt_fpr_list[i] = 1.0
+                    valid_list[i] = False  # Mark as invalid for next iteration
+                    changed_in_iteration = True
+                elif fpr_i < 0.0: # Should not happen if adjusted_F >= 0
+                    # Clamp negative FPR to 0
+                    opt_fpr_list[i] = 0.0
+                    # Keep it valid for now, maybe other regions compensate.
+                else:
+                    opt_fpr_list[i] = fpr_i
+            else:
+                # Keep previously invalidated regions at FPR = 1.0
+                opt_fpr_list[i] = 1.0
 
-                    # Clamp f_i between 0 and 1
-                    new_f_i = max(0.0, min(1.0, new_f_i))
-
-                    if new_f_i >= 1.0 - EPS: # If calculated FPR is >= 1
-                        if valid_list[i]: # If it was previously considered valid
-                            valid_list[i] = False # Mark as invalid (fix FPR to 1)
-                            opt_fpr_list[i] = 1.0
-                            changed = True
-                    else:
-                        opt_fpr_list[i] = new_f_i
-                else: # neg_pr_list[i] is 0, should be invalid
-                     if valid_list[i]: # Should not happen
-                          valid_list[i] = False
-                          opt_fpr_list[i] = 1.0 # Or 0? If pos_pr=0, 0. If pos_pr>0, 1?
-                          changed = True
-
-
-        if not changed: # Converged
+        # If no FPRs were capped at 1.0 in this iteration, the solution is stable
+        if not changed_in_iteration:
             break
 
-    # Final check on achieved FPR
-    achieved_F = sum(neg_pr_list[i] * opt_fpr_list[i] for i in range(k))
-    if not abs(achieved_F - F) < EPS * k: # Allow some tolerance
-         # This might happen if F is very small or distributions are tricky
-         # print(f"Warning: Achieved FPR {achieved_F} differs from target {F}")
-         pass
+    # Final check: Calculate the achieved FPR with the computed opt_fpr_list
+    achieved_F: float = sum(
+        opt_fpr_list[i] * neg_pr_list[i] for i in range(k)
+    )
+    if abs(achieved_F - F) > max(1e-5, F * 0.1): # Allow some tolerance
+        print(
+            f"Warning: OptimalFPR calculation result deviates significantly "
+            f"from target F={F}. Achieved F={achieved_F:.6f}. "
+            f"This might happen if F is unachievable or due to edge cases."
+        )
 
-    # Convert to 1-based indexing for consistency with original return type
-    final_fprs: List[Optional[float]] = [None] + opt_fpr_list
-    return final_fprs
+    # Convert f to 1-index with None at index 0 for consistency with API
+    final_fpr_list: List[Optional[float]] = [None] + opt_fpr_list
+    assert len(final_fpr_list) == k + 1
+    return final_fpr_list
 
 
-# --- Space Used Calculation ---
-def SpaceUsed(g: PrList, t: List[float], f: List[Optional[float]], n_keys: int) -> float:
+def SpaceUsed(
+    g: prList,
+    h: prList, # h is unused but kept for consistent signature
+    t: List[float],
+    f: List[Optional[float]],
+    n: int,
+) -> float:
     """
-    Calculates the total memory space (in bits) used by the backup Bloom filters.
+    Calculates the estimated total space usage (in bits) for the backup Bloom filters,
+    based on the standard Bloom filter space formula.
+
+    Formula: Space = sum_i (n * pos_pr_i * log2(1/f_i)) / ln(2)
+    where n * pos_pr_i is the number of keys in region i, and f_i is the FPR.
+    This corresponds to m/n_i = -log2(f_i) / ln(2) bits per element.
 
     Args:
-        g: PrList for positive keys.
-        t: List of k+1 region threshold boundaries.
-        f: List of k+1 FPRs [None, f_1, ..., f_k].
-        n_keys: Total number of positive keys inserted.
+        g (prList): Key probability distribution.
+        h (prList): Non-key probability distribution (unused).
+        t (List[float]): Threshold boundaries (length k+1).
+        f (List[Optional[float]]): FPRs for each region (1-indexed, f[0]=None).
+        n (int): Total number of positive keys inserted.
 
     Returns:
-        Total space used in bits.
+        float: Estimated total space usage in bits. Returns INF if any region
+               with keys requires f=0.
     """
-    k = len(t) - 1
-    if len(f) != k + 1:
-        raise ValueError("Length of f must be k+1")
-    if n_keys < 0:
-        raise ValueError("Number of keys cannot be negative")
-    if n_keys == 0:
-        return 0.0 # No keys, no space needed
+    k: int = len(t) - 1
+    assert len(f) == k + 1, "FPR list length must be k+1"
 
-    total_space = 0.0
-    _bits_per_element_const = -1.0 / (math.log(2) ** 2) # log2(e) / log(2) = 1/ln(2) ? No, it's -1/ln(2)^2
+    total_space_bits: float = 0.0
+    ln2: float = math.log(2)  # Constant ln(2) approx 0.693
 
-    for i in range(1, k + 1): # Iterate through regions 1 to k
-        fpr = f[i]
-        if fpr is None:
-             # Should not happen if OptimalFPR returns correctly
-             raise ValueError(f"FPR for region {i} is None")
+    for i in range(1, k + 1):  # Iterate through regions 1 to k
+        pos_pr: float = g.acc_range(t[i - 1], t[i])
+        num_keys_in_region: float = pos_pr * n
 
-        # Calculate number of positive keys expected in this region
-        pos_pr = g.acc_range(t[i - 1], t[i])
-        pos_num_expected = pos_pr * n_keys
+        if num_keys_in_region < EPS:  # Skip regions with effectively zero keys
+            continue
 
-        if pos_num_expected < EPS:
-            continue # No elements expected, no space needed for this filter
+        fpr_i: Optional[float] = f[i]
 
-        if fpr <= 0.0 or fpr >= 1.0:
-            # If FPR is 0, infinite space needed theoretically.
-            # If FPR is 1, zero space needed (no filter).
-            # BloomFilter handles capacity=0 or error_rate=0/1.
-            # Space calculation assumes optimal parameters.
-            if fpr >= 1.0 - EPS:
-                 continue # No space needed for FPR=1
-            if fpr <= EPS:
-                 # Treat FPR=0 as needing very large space, or skip?
-                 # The formula breaks down. Assume filter is perfect but takes space?
-                 # Let's skip for space calculation, assuming it means "reject all".
-                 # Or, if pos_num > 0 and f=0, it implies perfect recall needed.
-                 # The space formula gives infinity. Let's return INF if this happens.
-                 if pos_num_expected > EPS:
-                     # print(f"Warning: Region {i} has pos_pr > 0 but target FPR is 0.")
-                     return INF # Cannot achieve zero FPR with finite space
+        # Handle edge cases for FPR
+        if fpr_i is None:
+            # This shouldn't happen for regions with keys unless OptimalFPR failed.
+            # Assume no filter / zero space contribution? Or raise error?
+            print(f"Warning: FPR f[{i}] is None for region with keys.")
+            continue
+        elif fpr_i <= EPS:
+            # FPR = 0 implies infinite space (perfect filter).
+            # If keys exist here, space is theoretically infinite.
+            # In practice, means storing keys directly or using near-zero FPR.
+            # Return INF to signal this theoretical requirement.
+            return INF
+        elif fpr_i >= 1.0 - EPS:
+            # FPR = 1 implies no filter needed (accepts everything). Space = 0.
+            space_i: float = 0.0
+        else:
+            # Standard space formula for a Bloom filter:
+            # bits_per_element = -log2(fpr_i) / ln(2)  (approx 1.44 * log2(1/fpr_i))
+            # total_bits = num_elements * bits_per_element
+            bits_per_key: float = -math.log2(fpr_i) / ln2
+            space_i = num_keys_in_region * bits_per_key
 
-        # Formula for bits per element: m/n = -log2(fpr) / ln(2) = -log(fpr) / (ln(2)^2)
-        # Total bits = n * (-log(fpr) / (ln(2)^2))
-        try:
-            bits_for_region = pos_num_expected * (-math.log(fpr) / (math.log(2)**2))
-            total_space += bits_for_region
-        except ValueError: # log(fpr) error if fpr <= 0
-             if pos_num_expected > EPS:
-                 return INF # Should have been caught above
-             # else: pos_num is 0, log error irrelevant
+        total_space_bits += space_i
 
-    return total_space
-
-# --- MaxDivDP related functions (if needed by FastPLBF directly) ---
-# These seem to be primarily used within find_best_t_and_f which uses the
-# calc_DPKL and ThresMaxDiv functions defined above. MaxDivDP itself might
-# just be a wrapper around calc_DPKL. Let's assume we only need calc_DPKL
-# and ThresMaxDiv as refactored above.
-def MaxDivDP(g: PrList, h: PrList, N: int, k: int) -> Tuple[List[List[float]], List[List[Optional[int]]]]:
-     """Wrapper around calc_DPKL assuming the full range [1, N] is used."""
-     if g.N != N or h.N != N:
-          raise ValueError("N parameter must match PrList N")
-     return calc_DPKL(g, h, k, N) # Call with j=N
+    return total_space_bits
 
 
-
-class FastPLBF:
+# --- PLBF Base Class ---
+class PLBF(Generic[KeyType]):
     """
-    Partitioned Learned Bloom Filter (FastPLBF).
-
-    Optimizes region thresholds (t) and per-region False Positive Rates (f)
-    to minimize memory usage for a target overall False Positive Rate (F).
-    Uses dynamic programming based on KL divergence maximization for partitioning.
-
-    Relies on BloomFilter for the underlying Bloom filter implementation.
-    Currently assumes keys are strings for Bloom filter operations.
+    Partitioned Learned Bloom Filter (Base Implementation).
+    Uses standard DP for threshold calculation. Accepts a predictor function.
     """
-    __slots__ = (
-        'F', 'N', 'k', 'n', 't', 'f',
-        'memory_usage_of_backup_bf', 'backup_bloom_filters',
-        'segment_thre_list' # Keep track of segment thresholds used
-    )
 
-    def __init__(self,
-                 pos_keys: List[str], # Explicitly type keys as str for now
-                 pos_scores: List[float],
-                 neg_scores: List[float],
-                 F: float,
-                 N: int,
-                 k: int):
+    def __init__(
+        self,
+        predictor: Predictor[KeyType],
+        pos_keys: Sequence[KeyType],
+        neg_keys: Sequence[KeyType], # Used for training h distribution
+        F: float,
+        N: int,
+        k: int,
+    ) -> None:
         """
-        Args:
-            pos_keys: List of positive keys (strings).
-            pos_scores: List of scores [0, 1] corresponding to positive keys.
-            neg_scores: List of scores [0, 1] for negative samples (used for training).
-            F: Target overall False Positive Rate (0 < F < 1).
-            N: Number of segments to divide the score range [0, 1] into.
-            k: Number of regions (partitions) for the Bloom filters.
+        Initializes the PLBF.
 
-        Raises:
-            ValueError: If inputs are invalid (lengths mismatch, F out of range, etc.)
-            RuntimeError: If optimal parameters cannot be determined.
+        Args:
+            predictor (Predictor[KeyType]): Function mapping a key to a score [0, 1].
+            pos_keys (Sequence[KeyType]): Positive keys to insert into the filter.
+            neg_keys (Sequence[KeyType]): Negative keys used for learning the
+                                          non-key score distribution `h`.
+            F (float): Target overall FPR (0 < F < 1).
+            N (int): Number of initial segments for score discretization.
+            k (int): Number of final regions (partitions) (1 <= k <= N).
         """
         # --- Input Validation ---
-        if not isinstance(pos_keys, list) or not isinstance(pos_scores, list):
-            raise TypeError("pos_keys and pos_scores must be lists.")
-        if len(pos_keys) != len(pos_scores):
-            raise ValueError("pos_keys and pos_scores must have the same length.")
-        if not isinstance(neg_scores, list):
-            raise TypeError("neg_scores must be a list.")
-        if not isinstance(F, float) or not (0 < F < 1):
-            raise ValueError("Target FPR F must be a float between 0 and 1.")
-        if not isinstance(N, int) or N <= 0:
-            raise ValueError("Number of segments N must be a positive integer.")
-        if not isinstance(k, int) or k <= 0:
-            raise ValueError("Number of regions k must be a positive integer.")
-        if k > N:
-             raise ValueError("Number of regions k cannot exceed number of segments N.")
+        assert isinstance(pos_keys, Sequence)
+        assert isinstance(neg_keys, Sequence)
+        assert callable(predictor)
+        assert isinstance(F, float) and 0 < F < 1
+        assert isinstance(N, int) and N > 0
+        assert isinstance(k, int) and 1 <= k <= N
 
-        # Validate score ranges (optional but good practice)
-        if not all(0.0 <= s <= 1.0 for s in pos_scores):
-            raise ValueError("All pos_scores must be between 0.0 and 1.0.")
-        if not all(0.0 <= s <= 1.0 for s in neg_scores):
-            raise ValueError("All neg_scores must be between 0.0 and 1.0.")
-
+        # --- Store Core Parameters ---
+        self._predictor: Final[Predictor[KeyType]] = predictor
         self.F: Final[float] = F
         self.N: Final[int] = N
         self.k: Final[int] = k
-        self.n: Final[int] = len(pos_keys) # Number of positive keys
+        self.n: Final[int] = len(pos_keys)  # Total number of positive keys
 
-        # --- Parameter Calculation ---
-        # 1. Divide into segments and get probability distributions
-        self.segment_thre_list, g, h = self._divide_into_segments(pos_scores, neg_scores)
+        # --- Step 1: Compute Scores using Predictor ---
+        # Compute scores only once for efficiency
+        print("Computing scores using predictor...")
+        start_score_time = time.time()
+        pos_scores: List[float] = [predictor(key) for key in pos_keys]
+        neg_scores: List[float] = [predictor(key) for key in neg_keys]
+        end_score_time = time.time()
+        print(f"Score computation took {end_score_time - start_score_time:.2f}s")
 
-        # 2. Find optimal thresholds (t) and FPRs (f)
-        best_t, best_f, min_space = self._find_best_t_and_f(g, h)
-        if best_t is None or best_f is None:
-            raise RuntimeError("Could not determine optimal thresholds (t) and FPRs (f). "
-                               "Check input data distributions and parameters (N, k, F).")
+        # --- Step 2: Divide scores into segments & build prLists ---
+        print("Building segment distributions (prList)...")
+        self.segment_thre_list: Final[List[float]] = [
+            i / N for i in range(N + 1)
+        ]
+        self.g: prList = prList(pos_scores, self.segment_thre_list)
+        self.h: prList = prList(neg_scores, self.segment_thre_list)
 
-        self.t: Final[List[float]] = best_t
-        self.f: Final[List[Optional[float]]] = best_f # Note: f[0] is None
-        self.memory_usage_of_backup_bf: Final[float] = min_space
+        # --- Step 3: Find optimal thresholds (t) and FPRs (f) ---
+        # These will be set by _find_best_t_and_f
+        self.t: List[float] = []
+        self.f: List[Optional[float]] = []
+        self.memory_usage_of_backup_bf: float = 0.0
+        print("Finding optimal thresholds and FPRs...")
+        start_fit_time = time.time()
+        self._find_best_t_and_f() # Calls the appropriate DP method
+        end_fit_time = time.time()
+        print(f"Threshold/FPR optimization took {end_fit_time - start_fit_time:.2f}s")
 
-        # --- Bloom Filter Construction ---
-        # 3. Insert positive keys into the corresponding regional Bloom filters
-        self.backup_bloom_filters = self._build_bloom_filters(pos_keys, pos_scores)
+
+        # --- Step 4: Build Bloom filters and insert keys ---
+        # Filters are stored in self.bfs
+        self.bfs: List[Optional[BloomFilter]] = []
+        print("Building backup Bloom filters and inserting keys...")
+        start_build_time = time.time()
+        self._build_filters(pos_keys, pos_scores)
+        end_build_time = time.time()
+        print(f"Filter construction took {end_build_time - start_build_time:.2f}s")
 
 
-    def _divide_into_segments(self,
-                              pos_scores: List[float],
-                              neg_scores: List[float]
-                             ) -> Tuple[List[float], PrList, PrList]:
-        """Divides score range [0,1] into N segments and calculates PrLists."""
-        # Create uniform segment thresholds: [0/N, 1/N, ..., N/N]
-        segment_thre_list = [i / self.N for i in range(self.N + 1)]
-        g = PrList(pos_scores, segment_thre_list)
-        h = PrList(neg_scores, segment_thre_list)
-        return segment_thre_list, g, h
+    def _find_best_t_and_f(self) -> None:
+        """Finds the best region thresholds (t) and FPRs (f) using standard DP."""
+        # Calculate DPKL using standard O(N^2*k) DP
+        DPKL, DPPre = MaxDivDP(self.g, self.h, self.N, self.k)
 
-    def _find_best_t_and_f(self, g: PrList, h: PrList) -> Tuple[Optional[List[float]], Optional[List[Optional[float]]], float]:
-        """Finds optimal t and f by minimizing space for target FPR F."""
-        minSpaceUsed = INF
+        minSpaceUsed: float = INF
         t_best: Optional[List[float]] = None
         f_best: Optional[List[Optional[float]]] = None
 
-        # Calculate DP table once using the full range [1, N]
-        # MaxDivDP uses calc_DPKL internally for segments 1..N
-        try:
-            _, DPPre = MaxDivDP(g, h, self.N, self.k)
-        except Exception as e:
-             # Catch potential errors during DP calculation (e.g., math errors)
-             print(f"Error during MaxDivDP calculation: {e}")
-             return None, None, INF
+        # Iterate through possible ending segments (j-1) for the k-th region
+        for j in range(self.k, self.N + 1):
+            # Reconstruct thresholds `t` for k regions ending at segment j-1
+            t_current: Optional[List[float]] = ThresMaxDiv(
+                DPPre, j, self.k, self.segment_thre_list
+            )
+            if t_current is None:  # No valid partition found ending at j-1
+                continue
 
+            # Calculate optimal FPRs `f` for these thresholds `t`
+            f_current: List[Optional[float]] = OptimalFPR(
+                self.g, self.h, t_current, self.F, self.k
+            )
+            # OptimalFPR should ideally always return a valid list if t is valid.
 
-        # Reconstruct thresholds using the DPPre table for the full range
-        # ThresMaxDiv traces back from DPPre[N][k]
-        t = ThresMaxDiv(DPPre, self.N, self.k, self.segment_thre_list)
+            # Calculate space usage for this (t, f) combination
+            currentSpaceUsed: float = SpaceUsed(
+                self.g, self.h, t_current, f_current, self.n
+            )
 
-        if t is None:
-            # print("Warning: Could not reconstruct thresholds from DP table.")
-            # This implies no valid partitioning into k regions was found for segments 1..N
-            # The original code iterated through j (last segment of last region).
-            # Let's re-introduce that loop if the single ThresMaxDiv(N, k) fails.
-            # This suggests the interpretation of MaxDivDP/ThresMaxDiv might need refinement
-            # based on the original paper's intent.
+            # Update best if current space is lower
+            if currentSpaceUsed < minSpaceUsed:
+                minSpaceUsed = currentSpaceUsed
+                t_best = t_current
+                f_best = f_current
 
-            # --- Reverting to original loop structure for finding best t ---
-            DPKL_full, DPPre_full = MaxDivDP(g, h, self.N, self.k) # Calculate once
+        if t_best is None or f_best is None:
+            raise RuntimeError(
+                "PLBF: Could not find a valid partition (t, f). "
+                "Check input data or parameters (N, k, F)."
+            )
 
-            for j_end_segment in range(self.k, self.N + 1):
-                 # Try reconstructing thresholds assuming last region ends at j_end_segment
-                 # We need a way to reconstruct from DPPre_full[j_end_segment][k]?
-                 # The ThresMaxDiv function needs adaptation or DPPre needs reinterpretation.
-
-                 # Let's assume the original ThresMaxDiv was correct for its specific DP calc.
-                 # The FastPLBF version uses MaxDivDP -> calc_DPKL(N, k).
-                 # Let's try the direct reconstruction from N, k first.
-                 t_candidate = ThresMaxDiv(DPPre, self.N, self.k, self.segment_thre_list)
-
-                 if t_candidate is None:
-                      continue # Skip if no valid thresholds for this j
-
-                 # Calculate optimal FPRs for this threshold set t
-                 f_candidate = OptimalFPR(g, h, t_candidate, self.F, self.k)
-                 if f_candidate is None:
-                      continue # Skip if FPR calculation fails
-
-                 # Calculate space used for this (t, f) combination
-                 space = SpaceUsed(g, t_candidate, f_candidate, self.n)
-
-                 if space < minSpaceUsed:
-                      minSpaceUsed = space
-                      t_best = t_candidate
-                      f_best = f_candidate
-
-            # If after the loop, t_best is still None, then no solution was found.
-
-        else:
-             # Direct reconstruction from N, k worked
-             f = OptimalFPR(g, h, t, self.F, self.k)
-             if f is not None:
-                  space = SpaceUsed(g, t, f, self.n)
-                  if space < minSpaceUsed: # Should be the only result here
-                       minSpaceUsed = space
-                       t_best = t
-                       f_best = f
-
-        # Handle case where minSpaceUsed remains INF
-        if minSpaceUsed == INF:
-             return None, None, INF
-
-        return t_best, f_best, minSpaceUsed
-
-
-    def _build_bloom_filters(self, pos_keys: List[str], pos_scores: List[float]
-                            ) -> List[Optional[BloomFilter]]:
-        """Creates and populates the regional Bloom filters."""
-        if self.t is None or self.f is None:
-             raise RuntimeError("Thresholds (t) or FPRs (f) not calculated.")
-
-        # Count positive keys per region
-        pos_cnt_list = [0] * (self.k + 1) # 1-based index
-        region_assignments = [0] * self.n # Store region for each key
-        for idx, score in enumerate(pos_scores):
-            region_idx = self._get_region_idx(score)
-            pos_cnt_list[region_idx] += 1
-            region_assignments[idx] = region_idx
-
-        # Initialize Bloom filters
-        backup_filters: List[Optional[BloomFilter]] = [None] * (self.k + 1)
-        for i in range(1, self.k + 1):
-            region_fpr = self.f[i]
-            region_capacity = pos_cnt_list[i]
-
-            if region_fpr is None:
-                 # Should not happen with valid f from OptimalFPR
-                 print(f"Warning: FPR for region {i} is None. Skipping filter.")
-                 continue
-
-            if region_capacity == 0:
-                # No keys in this region, no filter needed.
-                # Ensure consistency: if capacity is 0, FPR should ideally be handled.
-                # OptimalFPR might set f=0 or f=1 depending on context.
-                # If f=0 and capacity=0, space is 0. If f=1 and capacity=0, space is 0.
-                continue # Leave backup_filters[i] as None
-
-            if region_fpr >= 1.0 - EPS:
-                # FPR is 1, no filtering needed for this region.
-                continue # Leave backup_filters[i] as None
-            elif region_fpr <= EPS:
-                # Target FPR is 0. BloomFilter requires error_rate > 0.
-                # If capacity > 0 and target FPR is 0, this implies perfect recall
-                # is needed, which standard Bloom filters approximate with very low FPR.
-                # Use a very small error rate.
-                # print(f"Warning: Region {i} has target FPR near 0. Using minimal error rate.")
-                effective_fpr = EPS # Use a tiny error rate
-                # Check if pos_cnt_list[i] > 0? Yes, checked above.
-                backup_filters[i] = BloomFilter(capacity=region_capacity,
-                                                          error_rate=effective_fpr)
-            else:
-                # Standard case: 0 < FPR < 1
-                backup_filters[i] = BloomFilter(capacity=region_capacity,
-                                                          error_rate=region_fpr)
-
-        # Add keys to the appropriate filters
-        for key, region_idx in zip(pos_keys, region_assignments):
-            if backup_filters[region_idx] is not None:
-                # Use the type-specific method (assuming string keys)
-                backup_filters[region_idx].add_str(key)
-
-        return backup_filters
+        self.t = t_best
+        self.f = f_best
+        self.memory_usage_of_backup_bf = (
+            minSpaceUsed if minSpaceUsed != INF else 0.0
+        )
 
     def _get_region_idx(self, score: float) -> int:
-        """Finds the region index (1 to k) for a given score."""
-        if self.t is None:
-            raise RuntimeError("Thresholds (t) not initialized.")
-        if not (0.0 <= score <= 1.0):
-            raise ValueError("Score must be between 0.0 and 1.0")
+        """Finds the region index (1 to k) for a given score based on thresholds t."""
+        assert 0.0 <= score <= 1.0, f"Score out of bounds: {score}"
+        assert hasattr(self, 't') and self.t, "Thresholds 't' not calculated yet."
 
-        # Find the index `i` such that t[i-1] < score <= t[i]
-        # bisect_left finds first index `i` where t[i] >= score
-        region_idx = bisect.bisect_left(self.t, score)
-
-        # Adjustments:
-        # - If score is exactly t[0] (0.0), it belongs to region 1.
-        # - If score is exactly t[i], bisect_left returns i. It belongs to region i.
-        # - If score > t[k-1] and score <= t[k] (1.0), it belongs to region k.
-        # bisect_left handles most cases correctly.
-
-        # Handle score == 0.0 explicitly
-        if abs(score - self.t[0]) < EPS:
-             return 1
-
-        # Handle score > t[k-1]
-        if region_idx == self.k + 1:
-             # This happens if score > t[k] (which should be 1.0)
-             # Clamp to region k if score is 1.0
-             if abs(score - self.t[self.k]) < EPS:
-                  return self.k
-             else: # Score > 1.0, should have been caught by validation
-                  raise ValueError("Score > 1.0 encountered in _get_region_idx")
-
-        # If score is exactly t[i], bisect_left gives i. This score falls into
-        # region i, which spans (t[i-1], t[i]]. So index i is correct.
+        # Find i such that t[i-1] < score <= t[i]. Region index is i (1-based).
+        # bisect_right finds insertion point `idx` where all elements <= score are to the left.
+        # So, t[idx-1] < score <= t[idx].
+        region_idx: int = bisect.bisect_right(self.t, score)
 
         # Clamp index to be within [1, k]
-        region_idx = max(1, min(self.k, region_idx))
-
+        region_idx = max(1, min(region_idx, self.k))
         return region_idx
 
+    def _build_filters(
+        self, pos_keys: Sequence[KeyType], pos_scores: List[float]
+    ) -> None:
+        """Creates Bloom filters and inserts positive keys."""
+        assert hasattr(self, 't') and self.t, "Thresholds 't' not set."
+        assert hasattr(self, 'f') and self.f, "FPRs 'f' not set."
+        assert len(pos_keys) == len(pos_scores)
 
-    def contains(self, key: str, score: float) -> bool:
+        # Count keys and collect keys falling into each region
+        pos_cnt_list: List[int] = [0] * (self.k + 1)  # 1-based index
+        keys_per_region: List[List[KeyType]] = [
+            [] for _ in range(self.k + 1)
+        ]
+
+        for key, score in zip(pos_keys, pos_scores):
+            region_idx: int = self._get_region_idx(score)
+            pos_cnt_list[region_idx] += 1
+            keys_per_region[region_idx].append(key)
+
+        # Create backup Bloom filters for regions where f_i is between 0 and 1
+        self.bfs = [None] * (self.k + 1)  # 1-based list of filters
+        for i in range(1, self.k + 1):
+            fpr_i: Optional[float] = self.f[i]
+            count_i: int = pos_cnt_list[i]
+
+            if count_i == 0:
+                # No keys in this region, no filter needed.
+                self.bfs[i] = None
+                continue
+
+            if fpr_i is None:
+                print(f"Warning: FPR f[{i}] is None. Cannot create filter.")
+                self.bfs[i] = None
+            elif fpr_i <= EPS:
+                # FPR is effectively 0. Requires perfect filtering.
+                # A standard BF cannot achieve f=0. This implies either:
+                # 1) No non-keys land here (neg_pr=0), so any key is positive.
+                # 2) Storing keys directly is needed.
+                # For simplicity, we won't create a BF. `contains` must handle f=0.
+                # If neg_pr=0, `contains` should be accurate without BF.
+                # If neg_pr>0, f=0 is theoretically impossible with BF.
+                self.bfs[i] = None # Mark as needing special handling in contains
+            elif fpr_i >= 1.0 - EPS:
+                # FPR is effectively 1. No filter needed, always return True.
+                self.bfs[i] = None
+            else:
+                # Standard case: Create and populate a Bloom filter
+                try:
+                    bf = BloomFilter(capacity=count_i, error_rate=fpr_i)
+                    for key in keys_per_region[i]:
+                        bf.add(key)
+                    self.bfs[i] = bf
+                except Exception as e:
+                    print(f"Error creating BloomFilter for region {i}: {e}")
+                    self.bfs[i] = None # Failed to create filter
+
+    def contains(self, key: KeyType) -> bool:
         """
-        Checks if the key-score pair might be in the filter.
+        Checks if a key might be present in the set represented by the PLBF.
 
         Args:
-            key: The key (string) to check.
-            score: The score associated with the key.
+            key (KeyType): The key to check.
 
         Returns:
-            True if the item is potentially present (membership test passes or
-                 the region has FPR=1).
-            False if the item is definitely not present (membership test fails).
+            bool: True if the key might be present (potential positive or false positive),
+                  False if the key is definitely not present (true negative).
         """
-        if self.backup_bloom_filters is None:
-             raise RuntimeError("Bloom filters not initialized.")
-        # We assume key is string here, matching __init__ and _build_bloom_filters
-        if not isinstance(key, str):
-             raise TypeError(f"Expected key to be str, got {type(key)}")
+        assert hasattr(self, 'bfs'), "Filters not initialized."
+        score: float = self._predictor(key)
+        assert 0.0 <= score <= 1.0, f"Predictor score out of bounds: {score}"
 
-        region_idx = self._get_region_idx(score)
-        regional_filter = self.backup_bloom_filters[region_idx]
+        region_idx: int = self._get_region_idx(score)
+        fpr_i: Optional[float] = self.f[region_idx]
+        bf: Optional[BloomFilter] = self.bfs[region_idx]
 
-        if regional_filter is None:
-            # No filter for this region (implies FPR >= 1), so always return True.
+        if fpr_i is None:
+            # Should not happen if initialization succeeded. Assume positive?
+            print(f"Warning: FPR f[{region_idx}] is None during contains().")
+            return True # Fail safe?
+        elif fpr_i >= 1.0 - EPS:
+            # Region has FPR=1. Always return True.
             return True
+        elif fpr_i <= EPS:
+            # Region has FPR=0. Should only contain positive keys.
+            # If a BF exists (e.g., placeholder for testing), query it.
+            # If no BF was created (because f=0 implies perfect separation or
+            # direct storage), the result depends on whether *any* positives landed here.
+            # A simple check: if bf exists, query it. Otherwise, assume False?
+            # This assumes f=0 only occurs when neg_pr=0 for the region.
+            # A more robust f=0 handling might involve storing keys if needed.
+            # Let's return False if no BF exists for f=0 region.
+            return bf is not None and (key in bf)
         else:
-            # Query the specific Bloom filter using the type-specific method
-            return regional_filter.contains_str(key)
-
-    def __contains__(self, item: Tuple[str, float]) -> bool:
-        """Allows using 'in' operator: `(key, score) in plbf`."""
-        if not isinstance(item, tuple) or len(item) != 2:
-            raise TypeError("Item for 'in' operator must be a tuple (key: str, score: float)")
-        key, score = item
-        if not isinstance(key, str):
-             raise TypeError(f"Expected key to be str, got {type(key)}")
-        if not isinstance(score, (float, int)):
-             raise TypeError(f"Expected score to be float, got {type(score)}")
-        return self.contains(key, float(score))
-
-    def __repr__(self) -> str:
-        return (f"{self.__class__.__name__}("
-                f"F={self.F:.2e}, N={self.N}, k={self.k}, n={self.n}, "
-                f"mem_bits={self.memory_usage_of_backup_bf:.2f})")
+            # Standard case: Query the Bloom filter for the region.
+            # If bf is None (e.g., creation failed or count was 0), key cannot be present.
+            return bf is not None and (key in bf)
 
 
-
-# --- Synthetic Data Generation ---
-
-def generate_synthetic_data(
-    num_pos: int,
-    num_neg: int,
-    seed: int = 42
-) -> Tuple[List[str], List[float], List[str], List[float]]:
+# --- FastPLBF Class ---
+class FastPLBF(PLBF[KeyType]):
     """
-    Generates synthetic keys and scores with some correlation between score and label.
-
-    Args:
-        num_pos: Number of positive samples (label=1).
-        num_neg: Number of negative samples (label=0).
-        seed: Random seed for reproducibility.
-
-    Returns:
-        A tuple containing: (pos_keys, pos_scores, neg_keys, neg_scores)
+    Partitioned Learned Bloom Filter (Fast Implementation).
+    Uses faster DP (monotone matrix property) for threshold calculation.
+    Inherits most methods from PLBF, overrides DP calculation.
     """
-    random.seed(seed)
-    pos_keys: List[str] = []
-    pos_scores: List[float] = []
-    neg_keys: List[str] = []
-    neg_scores: List[float] = []
 
-    print(f"Generating {num_pos} positive and {num_neg} negative samples...")
+    # Override _find_best_t_and_f to use the faster DP calculation
+    def _find_best_t_and_f(self) -> None:
+        """Finds the best region thresholds (t) and FPRs (f) using fast DP."""
+        # Calculate DPKL using fast O(N*k*logN) DP
+        DPKL, DPPre = fastMaxDivDP(self.g, self.h, self.N, self.k)
 
-    # Positive samples: Scores biased towards 1.0
-    # Using Beta distribution: Beta(alpha, beta). High alpha, low beta biases towards 1.
-    alpha_pos, beta_pos = 5, 1.5
-    for i in range(num_pos):
-        key = f"positive_key_{i:07d}"
-        score = random.betavariate(alpha_pos, beta_pos)
-        pos_keys.append(key)
-        pos_scores.append(score)
+        minSpaceUsed: float = INF
+        t_best: Optional[List[float]] = None
+        f_best: Optional[List[Optional[float]]] = None
 
-    # Negative samples: Scores biased towards 0.0
-    # Using Beta distribution: Low alpha, high beta biases towards 0.
-    alpha_neg, beta_neg = 1.5, 5
-    for i in range(num_neg):
-        key = f"negative_key_{i:07d}"
-        score = random.betavariate(alpha_neg, beta_neg)
-        neg_keys.append(key)
-        neg_scores.append(score)
+        # Iterate through possible ending segments (j-1) for the k-th region.
+        # This allows finding the optimal partition which might not use all N segments.
+        for j in range(self.k, self.N + 1):
+            t_current: Optional[List[float]] = ThresMaxDiv(
+                DPPre, j, self.k, self.segment_thre_list
+            )
+            if t_current is None:
+                continue
 
-    print("Synthetic data generation complete.")
-    return pos_keys, pos_scores, neg_keys, neg_scores
+            f_current: List[Optional[float]] = OptimalFPR(
+                self.g, self.h, t_current, self.F, self.k
+            )
+            currentSpaceUsed: float = SpaceUsed(
+                self.g, self.h, t_current, f_current, self.n
+            )
 
-# --- Main Experiment Logic ---
+            if currentSpaceUsed < minSpaceUsed:
+                minSpaceUsed = currentSpaceUsed
+                t_best = t_current
+                f_best = f_current
+
+        if t_best is None or f_best is None:
+            raise RuntimeError(
+                "FastPLBF: Could not find a valid partition (t, f). "
+                "Check input data or parameters (N, k, F)."
+            )
+
+        self.t = t_best
+        self.f = f_best
+        self.memory_usage_of_backup_bf = (
+            minSpaceUsed if minSpaceUsed != INF else 0.0
+        )
+
+
+# --- Main Execution Block ---
 def main() -> None:
-    # --- Configuration Constants ---
-    NUM_POSITIVE_SAMPLES: int = 100000
-    NUM_NEGATIVE_SAMPLES: int = 500000
-    TEST_SET_FRACTION: float = 0.7
-    RANDOM_SEED: int = 42
-    N_SEGMENTS: int = 1000
-    K_REGIONS: int = 10
-    TARGET_FPR: float = 0.01 # Target for PLBF construction
-
-    # --- Data Generation & Preparation ---
-    pos_keys, pos_scores, all_neg_keys, all_neg_scores = generate_synthetic_data(
-        NUM_POSITIVE_SAMPLES, NUM_NEGATIVE_SAMPLES, RANDOM_SEED
+    """Main function to parse arguments, load data, build filter, and test."""
+    parser = argparse.ArgumentParser(
+        description="Construct and test a Fast Partitioned Learned Bloom Filter."
     )
-    if not all_neg_keys:
-        print("Warning: No negative samples generated. FPR testing will be skipped.")
-        train_neg_scores, test_neg_keys, test_neg_scores = [], [], []
-    else:
-        neg_combined = list(zip(all_neg_keys, all_neg_scores))
-        train_neg_combined, test_neg_combined = train_test_split(
-            neg_combined, test_size=TEST_SET_FRACTION, random_state=RANDOM_SEED
-        )
-        train_neg_scores = [item[1] for item in train_neg_combined]
-        test_neg_keys = [item[0] for item in test_neg_combined]
-        test_neg_scores = [item[1] for item in test_neg_combined] # Keep scores
+    parser.add_argument(
+        "--data_path",
+        action="store",
+        dest="data_path",
+        type=str,
+        required=True,
+        help="Path of the dataset CSV file (needs 'key', 'score', 'label' columns)",
+    )
+    parser.add_argument(
+        "--N",
+        action="store",
+        dest="N",
+        type=int,
+        required=True,
+        help="N: The number of initial segments for discretization",
+    )
+    parser.add_argument(
+        "--k",
+        action="store",
+        dest="k",
+        type=int,
+        required=True,
+        help="k: The number of final regions (partitions)",
+    )
+    parser.add_argument(
+        "--F",
+        action="store",
+        dest="F",
+        type=float,
+        required=True,
+        help="F: The target overall false positive rate",
+    )
+    parser.add_argument(
+        "--test_split",
+        action="store",
+        dest="test_split",
+        type=float,
+        default=0.7,
+        help="Fraction of negative samples to use for testing (default: 0.7)",
+    )
+    parser.add_argument(
+        "--seed",
+        action="store",
+        dest="seed",
+        type=int,
+        default=0,
+        help="Random seed for train/test split (default: 0)",
+    )
+    parser.add_argument(
+        "--use_fast_dp",
+        action="store_true",
+        default=True,
+        help="Use the FastPLBF (O(N^2k) DP) implementation as opposed to standard PLBF (O(NklogN) DP). Default is FastPLBF.",
+    )
 
-    print(f"\nParameters: N={N_SEGMENTS}, k={K_REGIONS}, F={TARGET_FPR}")
-    print(f"Data: {len(pos_keys)} positive keys, "
-          f"{len(train_neg_scores)} train negative scores, "
-          f"{len(test_neg_keys)} test negative keys.")
-    if not train_neg_scores: print("Warning: No training negative scores available.")
+    results: argparse.Namespace = parser.parse_args()
 
-    # --- FastPLBF Construction ---
-    print("\nConstructing FastPLBF...")
-    construct_start_plbf = time.time()
-    plbf: Optional[FastPLBF] = None
+    DATA_PATH: str = results.data_path
+    N_param: int = results.N
+    k_param: int = results.k
+    F_param: float = results.F
+    TEST_SPLIT: float = results.test_split
+    SEED: int = results.seed
+    USE_FAST: bool = results.use_fast_dp
+
+    # --- Data Loading and Preparation ---
+    print(f"Loading data from: {DATA_PATH}")
     try:
-        plbf = FastPLBF(
-            pos_keys=pos_keys, pos_scores=pos_scores,
-            neg_scores=train_neg_scores, F=TARGET_FPR,
-            N=N_SEGMENTS, k=K_REGIONS
-        )
+        data: pd.DataFrame = pd.read_csv(DATA_PATH)
+        # Ensure required columns exist
+        required_cols: set[str] = {'key', 'score', 'label'}
+        if not required_cols.issubset(data.columns):
+            raise ValueError(
+                f"CSV must contain columns: {', '.join(required_cols)}"
+            )
+        # Ensure scores are numeric and within [0, 1]
+        data['score'] = pd.to_numeric(data['score'], errors='coerce')
+        if data['score'].isnull().any():
+            raise ValueError("Non-numeric values found in 'score' column.")
+        if not ((data['score'] >= 0) & (data['score'] <= 1)).all():
+            raise ValueError("Scores must be between 0 and 1.")
+        # Ensure labels are numeric (typically 1 for positive, others negative)
+        data['label'] = pd.to_numeric(data['label'], errors='coerce')
+        if data['label'].isnull().any():
+            raise ValueError("Non-numeric values found in 'label' column.")
+
+    except FileNotFoundError:
+        print(f"Error: Data file not found at {DATA_PATH}")
+        exit(1)
+    except ValueError as e:
+        print(f"Error loading or validating data: {e}")
+        exit(1)
     except Exception as e:
-         print(f"\nError during FastPLBF construction: {e}")
-         import traceback
-         traceback.print_exc()
-    construct_end_plbf = time.time()
+        print(f"An unexpected error occurred during data loading: {e}")
+        exit(1)
 
-    # --- FastPLBF Verification & Testing ---
-    fpr_plbf = float('nan')
-    fp_cnt_plbf = 'N/A'
-    target_memory_bits_plbf = 0
-    num_test_neg = len(test_neg_keys)
+    # Separate positive and negative samples
+    positive_sample: pd.DataFrame = data.loc[(data["label"] == 1)]
+    negative_sample: pd.DataFrame = data.loc[(data["label"] != 1)]
 
-    if plbf:
-        print(f"FastPLBF Construction finished in {construct_end_plbf - construct_start_plbf:.4f} seconds.")
-        print(plbf)
-        print("\nVerifying FastPLBF (no false negatives)...")
-        false_negatives_plbf = 0
-        for key, score in zip(pos_keys, pos_scores):
-            if not plbf.contains(key, score): false_negatives_plbf += 1
-        print(f"  False Negatives Found: {false_negatives_plbf}")
+    if len(positive_sample) == 0:
+        print("Error: No positive samples (label=1) found in the data.")
+        exit(1)
+    if len(negative_sample) == 0:
+        print(
+            "Warning: No negative samples (label!=1) found."
+            " FPR calculation might be trivial or inaccurate."
+        )
+        # Create dummy negative sample for code structure if needed
+        train_negative: pd.DataFrame = negative_sample
+        test_negative: pd.DataFrame = negative_sample
+    else:
+        # Split negatives into train (for learning h) and test (for evaluation)
+        train_negative, test_negative = train_test_split(
+            negative_sample, test_size=TEST_SPLIT, random_state=SEED
+        )
 
-        print("\nCalculating FastPLBF false positive rate on test set...")
-        fp_cnt_plbf_val = 0
-        if num_test_neg > 0:
-            for key, score in zip(test_neg_keys, test_neg_scores):
-                if plbf.contains(key, score): fp_cnt_plbf_val += 1
-            fpr_plbf = fp_cnt_plbf_val / num_test_neg
-            fp_cnt_plbf = fp_cnt_plbf_val # Store count
+    # Prepare key lists
+    pos_keys: List[Any] = list(positive_sample["key"])
+    # Use training negatives for building the filter's h distribution
+    train_neg_keys: List[Any] = list(train_negative["key"])
+    # Use testing negatives for evaluating the actual FPR
+    test_neg_keys: List[Any] = list(test_negative["key"])
+
+    # --- Create Predictor Function ---
+    # In a real scenario, this would be your trained model or scoring function.
+    # Here, we simulate it by looking up pre-computed scores from the CSV.
+    score_lookup: Dict[Any, float] = dict(zip(data['key'], data['score']))
+    def csv_predictor(key: Any) -> float:
+        """Simulated predictor looking up scores from the loaded CSV."""
+        return score_lookup.get(key, 0.0) # Default score if key not found?
+
+    predictor_func: Predictor[Any] = csv_predictor
+
+    print(f"Positive samples: {len(pos_keys)}")
+    print(f"Training negative samples: {len(train_neg_keys)}")
+    print(f"Testing negative samples: {len(test_neg_keys)}")
+    print(f"Parameters: N={N_param}, k={k_param}, F={F_param}")
+    print(f"Using {'Fast DP' if USE_FAST else 'Standard DP'} implementation.")
+
+    # --- Construct PLBF ---
+    print("Constructing PLBF...")
+    total_construct_start: float = time.time()
+    plbf_instance: PLBF[Any]
+    try:
+        if USE_FAST:
+            plbf_instance = FastPLBF(
+                predictor=predictor_func,
+                pos_keys=pos_keys,
+                neg_keys=train_neg_keys, # Use train negatives to learn h
+                F=F_param,
+                N=N_param,
+                k=k_param,
+            )
         else:
-            fpr_plbf = 0.0
-            fp_cnt_plbf = 0
-        print(f"  False Positives: {fp_cnt_plbf} / {num_test_neg}")
+            plbf_instance = PLBF(
+                predictor=predictor_func,
+                pos_keys=pos_keys,
+                neg_keys=train_neg_keys,
+                F=F_param,
+                N=N_param,
+                k=k_param,
+            )
+    except RuntimeError as e:
+        print(f"Error during PLBF construction: {e}")
+        exit(1)
+    except Exception as e:
+        print(f"An unexpected error occurred during construction: {e}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
 
-        # Get memory usage for comparison target
-        mem_usage_plbf = plbf.memory_usage_of_backup_bf
-        if isinstance(mem_usage_plbf, (int, float)) and mem_usage_plbf > 0 and mem_usage_plbf != math.inf:
-            target_memory_bits_plbf = int(round(mem_usage_plbf))
-            print(f"\nFastPLBF Memory Usage (Target for Standard): {target_memory_bits_plbf} bits")
-        else:
-            print("\nWarning: Could not determine valid memory usage for FastPLBF. Cannot construct comparable standard BF.")
-            target_memory_bits_plbf = 0 # Prevent standard BF construction
+    total_construct_end: float = time.time()
+    print(
+        "Construction finished in "
+        f"{total_construct_end - total_construct_start:.4f} seconds (total)."
+    )
+
+    # --- Verification: No False Negatives ---
+    print("Verifying no false negatives...")
+    fn_cnt: int = 0
+    for key in pos_keys:
+        if not plbf_instance.contains(key):
+            # print(f"False Negative detected: Key={key}, Score={predictor_func(key)}")
+            fn_cnt += 1
+    if fn_cnt == 0:
+        print("Verification successful: No false negatives found.")
     else:
-        print("FastPLBF construction failed. Cannot perform verification or testing.")
+        print(
+            f"Error: {fn_cnt} false negatives detected out of {len(pos_keys)}."
+        )
 
-
-    # --- Standard Bloom Filter Construction & Testing ---
-    print("\nConstructing Standard Bloom Filter (Targeting Same Size)...")
-    fpr_standard = float('nan')
-    fp_cnt_standard = 'N/A'
-    construction_time_standard = 0.0
-    actual_memory_bits_standard = 0
-    std_bf: Optional[BloomFilter] = None
-
-    if target_memory_bits_plbf > 0 and NUM_POSITIVE_SAMPLES > 0:
-        construct_start_standard = time.time()
-        # Calculate theoretical parameters for standard BF with n items and m bits
-        m = target_memory_bits_plbf
-        n = NUM_POSITIVE_SAMPLES
-        # Optimal k
-        k_std_opt = max(1, int(round((m / n) * math.log(2))))
-        # Theoretical FPR (p) for this n, m, k
-        try:
-             exponent = -k_std_opt * n / m
-             # Prevent overflow if exponent is extremely small
-             if exponent < -700: # Approximately exp(-700) is near float minimum
-                  p_std_theory = 0.0
-             else:
-                  base = 1.0 - math.exp(exponent)
-                  # Prevent potential issues with base slightly > 1 due to precision
-                  base = min(1.0, base)
-                  p_std_theory = base ** k_std_opt
-             # Ensure p is within valid range (0, 1) for BloomFilter init
-             p_std_theory = max(sys.float_info.min, min(1.0 - sys.float_info.epsilon, p_std_theory))
-
-        except (OverflowError, ValueError):
-             print("Warning: Could not calculate theoretical FPR for standard BF. Using default 0.01.")
-             p_std_theory = 0.01 # Fallback, though comparison will be less accurate
-
-        print(f"  Standard BF Target: n={n}, target_m={m}, optimal_k={k_std_opt}, theoretical_p={p_std_theory:.4e}")
-
-        if p_std_theory <= 0 or p_std_theory >= 1:
-             print("  Warning: Theoretical standard FPR is <= 0 or >= 1. Cannot initialize BloomFilter accurately.")
-        else:
-            try:
-                # Initialize BloomFilter using n and theoretical p
-                std_bf = BloomFilter(capacity=n, error_rate=p_std_theory)
-                actual_memory_bits_standard = std_bf.size # Get the *actual* size calculated by the filter
-                print(f"  Standard BF Initialized: Actual size (m) = {actual_memory_bits_standard} bits")
-
-                # Populate the standard Bloom filter
-                print("  Populating standard BF...")
-                for key in pos_keys:
-                    std_bf.add_str(key) # Use the correct method
-                construct_end_standard = time.time()
-                construction_time_standard = construct_end_standard - construct_start_standard
-                print(f"  Population finished in {construction_time_standard:.4f} s.")
-
-                # Test FPR of the standard Bloom filter
-                print("  Calculating standard BF false positive rate...")
-                fp_cnt_standard_val = 0
-                if num_test_neg > 0:
-                    for key in test_neg_keys: # Scores are irrelevant
-                        if std_bf.contains_str(key): # Use the correct method
-                            fp_cnt_standard_val += 1
-                    fpr_standard = fp_cnt_standard_val / num_test_neg
-                    fp_cnt_standard = fp_cnt_standard_val
-                else:
-                    fpr_standard = 0.0
-                    fp_cnt_standard = 0
-                print(f"  False Positives: {fp_cnt_standard} / {num_test_neg}")
-
-            except ValueError as e:
-                print(f"Error initializing/populating standard BloomFilter: {e}")
-                fp_cnt_standard = 'InitError'
-            except Exception as e:
-                print(f"An unexpected error occurred during standard BF construction/testing: {e}")
-                import traceback
-                traceback.print_exc()
-                fp_cnt_standard = 'Error'
-
-    elif NUM_POSITIVE_SAMPLES == 0:
-         print("  Skipping standard BF: No positive samples to insert.")
+    # --- Testing: False Positive Rate ---
+    print("Calculating false positive rate on test set...")
+    fp_cnt: int = 0
+    if len(test_neg_keys) > 0:
+        for key in test_neg_keys:
+            if plbf_instance.contains(key):
+                fp_cnt += 1
+        measured_fpr: float = fp_cnt / len(test_neg_keys)
     else:
-         print("  Skipping standard BF: Target memory size from FastPLBF is invalid.")
+        measured_fpr = 0.0  # No test negatives to measure FPR
 
-
-    # --- Final Results Comparison ---
-    print("\n--- Final Results ---")
-    if plbf:
-        mem_plbf_str = f"{target_memory_bits_plbf}" # Use the calculated target bits
-        mem_plbf_bytes_str = f"{target_memory_bits_plbf / 8:.2f}"
-        print(f"FastPLBF Construction Time: {construct_end_plbf - construct_start_plbf:.4f} s")
-        print(f"FastPLBF Memory Usage (bits): {mem_plbf_str}")
-        print(f"FastPLBF Memory Usage (bytes): {mem_plbf_bytes_str}")
-        print(f"FastPLBF False Positive Rate: {fpr_plbf:.6f} [{fp_cnt_plbf} / {num_test_neg}]")
+    # --- Output Results ---
+    print("\n--- Results ---")
+    print(f"Target Overall FPR (F): {F_param:.6f}")
+    print(
+        f"Measured FPR on test set: {measured_fpr:.6f} "
+        f"[{fp_cnt} / {len(test_neg_keys)}]"
+    )
+    print(
+        "Total Construction Time: "
+        f"{total_construct_end - total_construct_start:.4f} seconds"
+    )
+    # Convert bits to KiB or MiB for readability
+    mem_bits: float = plbf_instance.memory_usage_of_backup_bf
+    mem_kib: float = mem_bits / 8.0 / 1024.0
+    mem_mib: float = mem_kib / 1024.0
+    if mem_mib >= 1.0:
+        print(
+            f"Memory Usage of Backup BFs: {mem_mib:.2f} MiB "
+            f"({mem_bits:.0f} bits)"
+        )
     else:
-        print("FastPLBF Construction Time: N/A (Failed)")
-        print("FastPLBF Memory Usage (bits): N/A")
-        print("FastPLBF Memory Usage (bytes): N/A")
-        print(f"FastPLBF False Positive Rate: N/A")
+        print(
+            f"Memory Usage of Backup BFs: {mem_kib:.2f} KiB "
+            f"({mem_bits:.0f} bits)"
+        )
 
-    print("-" * 20)
-    if std_bf:
-        print(f"Standard BF Construction Time: {construction_time_standard:.4f} s")
-        print(f"Standard BF Memory Usage (bits): {actual_memory_bits_standard}") # Report actual size
-        print(f"Standard BF Memory Usage (bytes): {actual_memory_bits_standard / 8:.2f}")
-        print(f"Standard BF False Positive Rate: {fpr_standard:.6f} [{fp_cnt_standard} / {num_test_neg}]")
-    else:
-        print("Standard BF Construction Time: N/A (Not run or failed)")
-        print(f"Standard BF Memory Usage (bits): N/A (Target was {target_memory_bits_plbf})")
-        print("Standard BF Memory Usage (bytes): N/A")
-        print(f"Standard BF False Positive Rate: N/A")
-
-    print("-" * 20)
-    print(f"Target Overall FPR for PLBF (F): {TARGET_FPR:.6f}")
-
-    # Optional: Print PLBF details if construction succeeded
-    if plbf:
-        # (Details printing code remains the same as before)
-        if hasattr(plbf, 't') and plbf.t:
-            print("\nFastPLBF Optimal Thresholds (t):")
-            t_formatted = [f"{th:.4f}" for th in plbf.t]
-            print(f"  [{', '.join(t_formatted)}]")
-        if hasattr(plbf, 'f') and plbf.f:
-            print("FastPLBF Optimal Region FPRs (f):")
-            f_formatted = ["None" if x is None else f"{x:.4e}" for x in plbf.f]
-            print(f"  [{', '.join(f_formatted)}]")
-
+    print("\nOptimal Thresholds (t):")
+    print([f"{th:.4f}" for th in plbf_instance.t])
+    print("\nOptimal FPRs per Region (f):")
+    # Format FPRs nicely (handle None)
+    f_formatted: List[str] = ["None"] + [
+        f"{fpr:.4e}" if fpr is not None else "None"
+        for fpr in plbf_instance.f[1:]
+    ]
+    print(f_formatted)
+    print("----------------")
 
 
 if __name__ == "__main__":
-    import time
-    import random
-    import pandas as pd
-    from sklearn.model_selection import train_test_split
-    import sys
-    import os
     main()
-    
-
-
