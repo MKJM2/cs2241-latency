@@ -420,10 +420,6 @@ def ThresMaxDiv(
     reversed_t: List[float] = [1.0]  # Last boundary is always 1.0
 
     current_end_idx: int = end_segment_idx
-    # Add boundary t_{k-1} which is the threshold at the end of segment current_end_idx
-    # Note: segment_thre_list[i] is the threshold *after* segment i.
-    # So, segment_thre_list[current_end_idx] is the correct boundary.
-    reversed_t.append(segment_thre_list[current_end_idx])
 
     # Trace back from region k down to region 1
     for reg_idx in reversed(range(1, k)):  # reg_idx goes from k-1 down to 1
@@ -1228,7 +1224,7 @@ def main() -> None:
     # --- Construct PLBF ---
     print(f"\nConstructing {'FastPLBF' if USE_FAST else 'PLBF'}...")
     print(f"Parameters: N={N_param}, k={k_param}, F={F_param}")
-    total_construct_start: float = time.time()
+    _total_construct_start: float = time.time()
     plbf_instance: PLBF[str]
     try:
         PLBFClass: type = FastPLBF if USE_FAST else PLBF

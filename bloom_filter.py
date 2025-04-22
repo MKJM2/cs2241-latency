@@ -1,7 +1,7 @@
 import math
-import xxhash
-import struct # For integer serialization
-from bitarray import bitarray
+import xxhash  # type: ignore[import-not-found]
+import struct  # For integer serialization
+from bitarray import bitarray  # type: ignore[import-not-found]
 from typing import List, Final, Tuple, Callable, Any
 
 # --- Constants ---
@@ -11,8 +11,9 @@ XXH_SEED2: Final[int] = 6917
 # '<q' = little-endian signed long long (8 bytes)
 # '>q' = big-endian signed long long (8 bytes)
 # Choose one and stick to it. Big-endian is common network order.
-INT_STRUCT_FORMAT: Final[str] = '>q'
-INT_BYTE_LENGTH: Final[int] = struct.calcsize(INT_STRUCT_FORMAT) # Should be 8
+INT_STRUCT_FORMAT: Final[str] = ">q"
+INT_BYTE_LENGTH: Final[int] = struct.calcsize(INT_STRUCT_FORMAT)  # Should be 8
+
 
 class BloomFilter:
     """
@@ -31,8 +32,14 @@ class BloomFilter:
     """
 
     __slots__ = (
-        'capacity', 'error_rate', 'size', 'num_hashes',
-        'bit_array', 'num_items', '_hasher1_intdigest', '_hasher2_intdigest'
+        "capacity",
+        "error_rate",
+        "size",
+        "num_hashes",
+        "bit_array",
+        "num_items",
+        "_hasher1_intdigest",
+        "_hasher2_intdigest",
     )
 
     # Type alias for the hash function signature
@@ -68,24 +75,26 @@ class BloomFilter:
         self.num_items = 0
 
         # Initialize hashers using xxh64_intdigest for direct integer output
-        self._hasher1_intdigest: BloomFilter.IntDigestHasher = \
+        self._hasher1_intdigest: BloomFilter.IntDigestHasher = (
             lambda b: xxhash.xxh64_intdigest(b, seed=XXH_SEED1)
-        self._hasher2_intdigest: BloomFilter.IntDigestHasher = \
+        )
+        self._hasher2_intdigest: BloomFilter.IntDigestHasher = (
             lambda b: xxhash.xxh64_intdigest(b, seed=XXH_SEED2)
+        )
 
     @staticmethod
     def _calculate_optimal_params(capacity: int, error_rate: float) -> Tuple[int, int]:
         """Calculates optimal size (m) and hash count (k)."""
-        if capacity <= 0: # Should be caught by __init__, but defensive check
-             return 1, 1
+        if capacity <= 0:  # Should be caught by __init__, but defensive check
+            return 1, 1
 
         # m = - (n * ln(p)) / (ln(2)^2)
-        m_float = - (capacity * math.log(error_rate)) / (math.log(2) ** 2)
-        size = max(1, int(math.ceil(m_float))) # Ensure size is at least 1
+        m_float = -(capacity * math.log(error_rate)) / (math.log(2) ** 2)
+        size = max(1, int(math.ceil(m_float)))  # Ensure size is at least 1
 
         # k = (m / n) * ln(2)
         k_float = (size / capacity) * math.log(2)
-        num_hashes = max(1, int(math.ceil(k_float))) # Ensure at least 1 hash
+        num_hashes = max(1, int(math.ceil(k_float)))  # Ensure at least 1 hash
 
         return size, num_hashes
 
@@ -103,17 +112,17 @@ class BloomFilter:
     def _add_indices(self, indices: List[int]) -> None:
         """Sets the bits at the given indices in the bit array."""
         # This loop relies on the speed of bitarray's C implementation
-        bit_arr = self.bit_array # Local reference slight optimization
+        bit_arr = self.bit_array  # Local reference slight optimization
         for index in indices:
             bit_arr[index] = 1
 
     def _check_indices(self, indices: List[int]) -> bool:
         """Checks if all bits at the given indices are set."""
-        bit_arr = self.bit_array # Local reference
+        bit_arr = self.bit_array  # Local reference
         for index in indices:
             if not bit_arr[index]:
-                return False # Definitely not present (early exit)
-        return True # Possibly present
+                return False  # Definitely not present (early exit)
+        return True  # Possibly present
 
     # --- Public Type-Specific Add Methods ---
 
@@ -128,7 +137,7 @@ class BloomFilter:
         self._add_indices(indices)
         self.num_items += 1
 
-    def add_str(self, item: str, encoding: str = 'utf-8') -> None:
+    def add_str(self, item: str, encoding: str = "utf-8") -> None:
         """
         Adds a string to the Bloom filter after encoding it.
 
@@ -153,8 +162,10 @@ class BloomFilter:
             item_bytes = struct.pack(INT_STRUCT_FORMAT, item)
         except struct.error as e:
             # Handle cases where the integer might be too large for the format
-            raise ValueError(f"Integer {item} cannot be packed into format "
-                             f"'{INT_STRUCT_FORMAT}'. Error: {e}") from e
+            raise ValueError(
+                f"Integer {item} cannot be packed into format "
+                f"'{INT_STRUCT_FORMAT}'. Error: {e}"
+            ) from e
         indices = self._get_indices(item_bytes)
         self._add_indices(indices)
         self.num_items += 1
@@ -174,7 +185,9 @@ class BloomFilter:
         elif isinstance(item, int):
             self.add_int(item)
         else:
-            raise TypeError(f"Unsupported type: {type(item).__name__!r}. Supported types: bytes, str, int")
+            raise TypeError(
+                f"Unsupported type: {type(item).__name__!r}. Supported types: bytes, str, int"
+            )
 
     # --- Public Type-Specific Contains Methods ---
 
@@ -192,7 +205,7 @@ class BloomFilter:
         indices = self._get_indices(item)
         return self._check_indices(indices)
 
-    def contains_str(self, item: str, encoding: str = 'utf-8') -> bool:
+    def contains_str(self, item: str, encoding: str = "utf-8") -> bool:
         """
         Checks if a string might be in the Bloom filter after encoding it.
 
@@ -222,11 +235,11 @@ class BloomFilter:
         """
         try:
             item_bytes = struct.pack(INT_STRUCT_FORMAT, item)
-        except struct.error as e:
-             # If packing fails, it cannot have been added with add_int
+        except struct.error as _e:
+            # If packing fails, it cannot have been added with add_int
             # Log warning or re-raise depending on desired strictness
             # print(f"Warning: Integer {item} cannot be packed. Returning False.")
-            return False # Or raise ValueError if invalid input shouldn't be checked
+            return False  # Or raise ValueError if invalid input shouldn't be checked
         indices = self._get_indices(item_bytes)
         return self._check_indices(indices)
 
@@ -248,7 +261,9 @@ class BloomFilter:
         elif isinstance(item, int):
             return self.contains_int(item)
         else:
-            raise TypeError(f"Unsupported type: {type(item).__name__!r}. Supported types: bytes, str, int")
+            raise TypeError(
+                f"Unsupported type: {type(item).__name__!r}. Supported types: bytes, str, int"
+            )
 
     # --- Other Public Methods ---
 
@@ -276,7 +291,7 @@ class BloomFilter:
         n = self.num_items
         m = self.size
 
-        if m == 0: # Avoid division by zero
+        if m == 0:  # Avoid division by zero
             return 1.0
 
         try:
@@ -294,7 +309,6 @@ class BloomFilter:
         # Clamp result just in case of floating point inaccuracies
         return max(0.0, min(1.0, rate))
 
-
     def __repr__(self) -> str:
         """Returns a developer-friendly representation of the filter."""
         return (
@@ -308,15 +322,14 @@ class BloomFilter:
 
 
 if __name__ == "__main__":
-
     # --- Example Usage ---
-    bf = BloomFilter(capacity=100000, error_rate=0.01) # 100k items, 1% FP
+    bf = BloomFilter(capacity=100000, error_rate=0.01)  # 100k items, 1% FP
 
     # Must use type-specific methods
     bf.add_str("hello world")
     bf.add_bytes(b"raw data")
     bf.add_int(1234567890)
-    bf.add_int(-98765) # Works with signed format '>q'
+    bf.add_int(-98765)  # Works with signed format '>q'
 
     print(bf)
     print(f"Contains 'hello world': {bf.contains_str('hello world')}")
@@ -336,4 +349,3 @@ if __name__ == "__main__":
 
     # Checking a non-member integer
     print(f"Contains 1000000 (not added): {bf.contains_int(1000000)}")
-     
