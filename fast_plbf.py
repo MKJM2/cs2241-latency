@@ -21,13 +21,17 @@ from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.exceptions import NotFittedError
+
 from bloom_filter import BloomFilter
+from utils import deep_sizeof, sizeof
 
 
 # Type variables and aliases
 KeyType = TypeVar("KeyType")
 # Define a specific type for the predictor function
 Predictor = Callable[[KeyType], float]
+# Define a specific type for the serializer function
+Serializer = Callable[[KeyType], bytes]
 
 # Constants
 EPS: Final[float] = 1e-8
@@ -697,6 +701,7 @@ class PLBF(Generic[KeyType]):
         predictor: Predictor[KeyType],
         pos_keys: Sequence[KeyType],
         neg_keys: Sequence[KeyType],  # Used for training h distribution
+        serializer: Serializer[KeyType],
         F: float,
         N: int,
         k: int,
@@ -723,6 +728,7 @@ class PLBF(Generic[KeyType]):
 
         # --- Store Core Parameters ---
         self._predictor: Final[Predictor[KeyType]] = predictor
+        self._serializer: Serializer[KeyType] = serializer
         self.F: Final[float] = F
         self.N: Final[int] = N
         self.k: Final[int] = k
@@ -756,7 +762,7 @@ class PLBF(Generic[KeyType]):
 
         # --- Step 4: Build Bloom filters and insert keys ---
         # Filters are stored in self.bfs
-        self.bfs: List[Optional[BloomFilter]] = []
+        self.bfs: List[Optional[BloomFilter[KeyType]]] = []
         print("Building backup Bloom filters and inserting keys...")
         start_build_time = time.time()
         self._build_filters(pos_keys, pos_scores)
@@ -868,7 +874,9 @@ class PLBF(Generic[KeyType]):
             else:
                 # Standard case: Create and populate a Bloom filter
                 try:
-                    bf = BloomFilter(capacity=count_i, error_rate=fpr_i)
+                    bf = BloomFilter[KeyType](
+                        capacity=count_i, error_rate=fpr_i, serializer=self._serializer
+                    )
                     for key in keys_per_region[i]:
                         bf.add(key)
                     self.bfs[i] = bf
@@ -893,7 +901,7 @@ class PLBF(Generic[KeyType]):
 
         region_idx: int = self._get_region_idx(score)
         fpr_i: Optional[float] = self.f[region_idx]
-        bf: Optional[BloomFilter] = self.bfs[region_idx]
+        bf: Optional[BloomFilter[KeyType]] = self.bfs[region_idx]
 
         if fpr_i is None:
             # Should not happen if initialization succeeded. Assume positive?
@@ -916,6 +924,125 @@ class PLBF(Generic[KeyType]):
             # Standard case: Query the Bloom filter for the region.
             # If bf is None (e.g., creation failed or count was 0), key cannot be present.
             return bf is not None and (key in bf)
+
+    def get_actual_size_bytes(
+        self, with_overhead: bool = False, verbose: bool = False
+    ) -> int:
+        """
+        Calculates the actual memory footprint of the core PLBF data structures
+        in bytes, including thresholds, backup Bloom filters, and the predictor.
+
+        Uses the `deep_sizeof` helper function for potentially complex objects
+        like the predictor and Bloom filters. Excludes Python object overhead
+        by default unless `with_overhead` is True.
+
+        Args:
+            with_overhead (bool): Whether to include Python's base object overhead
+                                  (via sys.getsizeof) in the calculation. Defaults to False.
+            verbose (bool): If True, prints detailed size breakdown during deep_sizeof
+                            traversal (useful for debugging). Defaults to False.
+
+        Returns:
+            int: The estimated size in bytes.
+        """
+        total_bytes: int = 0
+        print_prefix = (
+            "Calculating actual size:" if verbose else None
+        )  # For clarity if verbose
+
+        # 1. Size of the threshold list (self.t)
+        if hasattr(self, "t") and self.t:
+            try:
+                # Use deep_sizeof for potentially more accurate list size including contents
+                threshold_bytes: int = deep_sizeof(
+                    self.t, with_overhead=with_overhead, verbose=False
+                )
+                if verbose and print_prefix:
+                    print(f"{print_prefix} Thresholds (t): {threshold_bytes} bytes")
+                total_bytes += threshold_bytes
+            except Exception as e:
+                if verbose:
+                    print(f"{print_prefix} Error calculating size of thresholds: {e}")
+
+        # 2. Size of the backup Bloom filters list (self.bfs)
+        if hasattr(self, "bfs") and self.bfs:
+            try:
+                # Calculate size of the list object itself + deep size of each filter inside
+                bfs_list_bytes: int = sizeof(
+                    self.bfs, with_overhead=with_overhead
+                )  # Size of list container
+                if verbose and print_prefix:
+                    print(
+                        f"{print_prefix} Backup Filter List Container: {bfs_list_bytes} bytes"
+                    )
+                total_bytes += bfs_list_bytes
+
+                for i, bf in enumerate(self.bfs):  # Iterate through the list
+                    if bf is not None:
+                        try:
+                            # Use deep_sizeof for the BloomFilter object
+                            # This assumes deep_sizeof can handle the BloomFilter's internal structure (e.g., bitarray)
+                            filter_bytes: int = deep_sizeof(
+                                bf, with_overhead=with_overhead, verbose=verbose
+                            )
+                            if verbose and print_prefix:
+                                print(
+                                    f"{print_prefix}  - Filter bfs[{i}]: {filter_bytes} bytes"
+                                )
+                            total_bytes += filter_bytes
+                        except Exception as e:
+                            if verbose:
+                                print(
+                                    f"{print_prefix}  - Error calculating size of filter bfs[{i}]: {e}"
+                                )
+            except Exception as e:
+                if verbose:
+                    print(
+                        f"{print_prefix} Error calculating size of backup filter list: {e}"
+                    )
+
+        # 3. Size of the predictor function/object (self._predictor)
+        if hasattr(self, "_predictor") and self._predictor is not None:
+            try:
+                # Use deep_sizeof, which is designed for complex objects like models
+                predictor_bytes: int = deep_sizeof(
+                    self._predictor, with_overhead=with_overhead, verbose=verbose
+                )
+                if verbose and print_prefix:
+                    print(
+                        f"{print_prefix} Predictor (_predictor): {predictor_bytes} bytes"
+                    )
+                total_bytes += predictor_bytes
+            except TypeError as e:
+                # deep_sizeof might raise TypeError for unsupported objects
+                if verbose:
+                    print(
+                        f"{print_prefix} Predictor type ({type(self._predictor)}) not directly supported by deep_sizeof, using basic sizeof: {e}"
+                    )
+                try:
+                    # Fallback to basic sizeof for the predictor object itself
+                    predictor_bytes = sizeof(
+                        self._predictor, with_overhead=with_overhead
+                    )
+                    if verbose:
+                        print(
+                            f"{print_prefix} Predictor (_predictor) (basic sizeof): {predictor_bytes} bytes"
+                        )
+                    total_bytes += predictor_bytes
+                except Exception as e2:
+                    if verbose:
+                        print(
+                            f"{print_prefix} Error calculating basic size of predictor: {e2}"
+                        )
+            except Exception as e:
+                if verbose:
+                    print(
+                        f"{print_prefix} Error calculating deep size of predictor: {e}"
+                    )
+
+        if verbose:
+            print(f"Total Calculated Actual Size: {total_bytes} bytes")
+        return total_bytes
 
 
 # --- FastPLBF Class ---
@@ -1141,10 +1268,10 @@ def main() -> None:
     )
     # Prepare data for predictor training (positives + subset of negatives)
     train_pred_data = pd.concat([positive_sample, neg_train_pred])
-    X_train_pred: pd.Series = train_pred_data[
+    X_train_pred: pd.Series[str] = train_pred_data[
         "key"
     ]  # Features are the keys (will be hashed)
-    y_train_pred: pd.Series = train_pred_data["binary_label"]  # Target is 0 or 1
+    y_train_pred: pd.Series[int] = train_pred_data["binary_label"]  # Target is 0 or 1
 
     # Define model pipeline: HashingVectorizer -> LogisticRegression
     # HashingVectorizer converts text keys to sparse feature vectors
@@ -1196,7 +1323,9 @@ def main() -> None:
         positive_prob: float = 0.0  # Default score
         try:
             # predict_proba returns [[prob_class_0, prob_class_1]]
-            proba: np.ndarray = predictor_model.predict_proba(key_iterable)
+            proba: np.ndarray[Any, np.dtype[np.float64]] = (
+                predictor_model.predict_proba(key_iterable)
+            )
             # Return the probability of the positive class (class 1)
             positive_prob = float(proba[0, 1])  # Ensure it's a standard float
         except NotFittedError:
@@ -1230,6 +1359,7 @@ def main() -> None:
         PLBFClass: type = FastPLBF if USE_FAST else PLBF
         plbf_instance = PLBFClass(
             predictor=predictor_func,
+            serializer=lambda s: s.encode("utf-8"),
             pos_keys=pos_keys,
             neg_keys=neg_keys_h_learn,  # Use h-learning negatives here
             F=F_param,
