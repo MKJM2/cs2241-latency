@@ -27,8 +27,8 @@ PLBFs combine a learned model (predictor) with multiple Bloom filters to achieve
 
 1.  **Clone the repository (if you haven't already):**
     ```bash
-    # git clone git@github.com:MKJM2/cs2241-latency.git
-    # cd cs2241-latency
+    git clone git@github.com:MKJM2/cs2241-latency.git
+    cd cs2241-latency
     ```
 
 2.  **Create and activate a Python virtual environment:**

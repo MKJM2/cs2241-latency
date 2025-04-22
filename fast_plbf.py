@@ -36,9 +36,7 @@ class prList:
     cumulative probabilities from a list of scores.
     """
 
-    def __init__(
-        self, scores: Sequence[float], thre_list: Sequence[float]
-    ) -> None:
+    def __init__(self, scores: Sequence[float], thre_list: Sequence[float]) -> None:
         """
         Initializes the probability list.
 
@@ -88,8 +86,8 @@ class prList:
         Calculates the sum of probabilities for segments from index l_idx to r_idx (inclusive).
 
         Args:
-            l_idx (int): Starting segment index \in {1 ... N}.
-            r_idx (int): Ending segment index \in {1 ... N}.
+            l_idx (int): Starting segment index in {1 ... N}.
+            r_idx (int): Ending segment index in {1 ... N}.
 
         Returns:
             float: Sum of self.pr[l_idx...r_idx].
@@ -106,8 +104,8 @@ class prList:
         Calculates accumulated probability in the score range (score_l, score_r].
 
         Args:
-            score_l (float): Left boundary (exclusive) \in [0, 1].
-            score_r (float): Right boundary (inclusive) \in [0, 1].
+            score_l (float): Left boundary (exclusive) in [0, 1].
+            score_r (float): Right boundary (inclusive) in [0, 1].
 
         Returns:
             float: Accumulated probability Pr(score_l < score <= score_r).
@@ -127,7 +125,9 @@ class prList:
         # We need sum from segment idx_l up to segment idx_r
         # Clamp indices to valid segment range [1, N]
         start_seg_idx = max(1, idx_l)
-        end_seg_idx = max(0, min(idx_r -1, self.N)) # -1 because bisect_right gives insertion point
+        end_seg_idx = max(
+            0, min(idx_r - 1, self.N)
+        )  # -1 because bisect_right gives insertion point
 
         if start_seg_idx > end_seg_idx:
             return 0.0  # Range contains no full segments or is invalid
@@ -168,9 +168,7 @@ def matrix_problem_on_monotone_matrix(
                 argmax_col = col_idx
         return argmax_col
 
-    def rec_solve(
-        row_start: int, row_end: int, col_start: int, col_end: int
-    ) -> None:
+    def rec_solve(row_start: int, row_end: int, col_start: int, col_end: int) -> None:
         """Recursive step of the algorithm."""
         if row_start > row_end:
             return
@@ -216,12 +214,8 @@ def calc_DPKL(
 
     # DPKL[n][q]: max DKL sum using q regions up to segment n
     # DPPre[n][q]: the end index (i-1) of the (q-1)-th region for the optimal solution ending at n with q regions.
-    DPKL: List[List[float]] = [
-        [-INF] * (k + 1) for _ in range(j_max + 1)
-    ]
-    DPPre: List[List[Optional[int]]] = [
-        [None] * (k + 1) for _ in range(j_max + 1)
-    ]
+    DPKL: List[List[float]] = [[-INF] * (k + 1) for _ in range(j_max + 1)]
+    DPPre: List[List[Optional[int]]] = [[None] * (k + 1) for _ in range(j_max + 1)]
     DPKL[0][0] = 0.0  # Base case: 0 regions, 0 segments -> 0 DKL
 
     for q in range(1, k + 1):  # Iterate through number of regions
@@ -286,9 +280,7 @@ def fast_calc_DPKL(
     assert 1 <= k <= N
 
     DPKL: List[List[float]] = [[-INF] * (k + 1) for _ in range(N + 1)]
-    DPPre: List[List[Optional[int]]] = [
-        [None] * (k + 1) for _ in range(N + 1)
-    ]
+    DPPre: List[List[Optional[int]]] = [[None] * (k + 1) for _ in range(N + 1)]
     DPKL[0][0] = 0.0  # Base case
 
     for q in range(1, k + 1):  # Iterate through number of regions
@@ -328,9 +320,7 @@ def fast_calc_DPKL(
         # Solve the row maxima problem for the implicitly defined N x N matrix A
         # max_args[p] will give the optimal starting segment index `i` (1-based)
         # for the q-th region ending at segment p (1-based).
-        max_args: List[Optional[int]] = matrix_problem_on_monotone_matrix(
-            func_A, N, N
-        )
+        max_args: List[Optional[int]] = matrix_problem_on_monotone_matrix(func_A, N, N)
 
         # Update DPKL and DPPre tables using the optimal starting points found
         for n in range(1, N + 1):  # n is the ending segment index (1-based)
@@ -447,9 +437,9 @@ def ThresMaxDiv(
     # Check if the path correctly leads back to the start DPKL[0][0]
     # The predecessor for the first region ending at current_end_idx should be 0.
     if DPPre[current_end_idx][1] != 0:
-         # This might indicate an issue if the first region didn't start correctly.
-         # However, the DP logic should handle this. If we reached here, path is likely valid.
-         pass
+        # This might indicate an issue if the first region didn't start correctly.
+        # However, the DP logic should handle this. If we reached here, path is likely valid.
+        pass
 
     reversed_t.append(0.0)  # Add the first boundary t_0 = 0.0
     t: List[float] = list(reversed(reversed_t))
@@ -459,15 +449,14 @@ def ThresMaxDiv(
         # This could happen if the optimal solution effectively uses fewer than k regions,
         # or if backtracking logic has an issue. Return None for safety.
         print(
-            f"Warning: Unexpected threshold list length {len(t)} for k={k}."
-            f" Path: {t}"
+            f"Warning: Unexpected threshold list length {len(t)} for k={k}. Path: {t}"
         )
         return None
 
     # Final check for monotonicity (should hold if DPPre is correct)
-    assert all(
-        t[i] <= t[i + 1] for i in range(len(t) - 1)
-    ), "Thresholds not monotonic after backtracking"
+    assert all(t[i] <= t[i + 1] for i in range(len(t) - 1)), (
+        "Thresholds not monotonic after backtracking"
+    )
 
     return t
 
@@ -498,17 +487,11 @@ def OptimalFPR(
 
     # Calculate positive (key) and negative (non-key) probabilities per region
     # Region i corresponds to interval (t[i-1], t[i]]
-    pos_pr_list: List[float] = [
-        g.acc_range(t[i - 1], t[i]) for i in range(1, k + 1)
-    ]
-    neg_pr_list: List[float] = [
-        h.acc_range(t[i - 1], t[i]) for i in range(1, k + 1)
-    ]
+    pos_pr_list: List[float] = [g.acc_range(t[i - 1], t[i]) for i in range(1, k + 1)]
+    neg_pr_list: List[float] = [h.acc_range(t[i - 1], t[i]) for i in range(1, k + 1)]
 
     # Check if probabilities sum correctly (within tolerance)
-    assert abs(sum(pos_pr_list) - 1.0) < EPS, (
-        f"Sum of pos_pr != 1: {sum(pos_pr_list)}"
-    )
+    assert abs(sum(pos_pr_list) - 1.0) < EPS, f"Sum of pos_pr != 1: {sum(pos_pr_list)}"
     # Sum of neg_pr might not be 1 if h represents a subset (e.g., training negatives)
 
     # Initialize validity: a region is invalid if it has zero non-key probability
@@ -536,7 +519,7 @@ def OptimalFPR(
                 # If invalid (neg_pr=0 or forced f=1), its contribution to overall F
                 # is neg_pr[i] * 1.0 (if f=1) or 0 (if neg_pr=0).
                 # This sum is used to adjust the target F for remaining valid regions.
-                invalid_neg_pr_sum += neg_pr_list[i] # Adds 0 if neg_pr was 0
+                invalid_neg_pr_sum += neg_pr_list[i]  # Adds 0 if neg_pr was 0
 
         # Check for edge cases where calculation is impossible or trivial
         if valid_neg_pr_sum < EPS:
@@ -558,7 +541,7 @@ def OptimalFPR(
                     opt_fpr_list[i] = 0.0
                 else:
                     opt_fpr_list[i] = 1.0
-            break # Exit loop
+            break  # Exit loop
 
         # Calculate the proportionality constant C based on adjusted target FPR
         # F = sum(f_i * neg_pr_i) = sum_{valid} f_i*neg_pr_i + sum_{invalid} 1*neg_pr_i
@@ -569,16 +552,18 @@ def OptimalFPR(
         # C = (F - invalid_neg_pr_sum) / sum_{valid} pos_pr_i
         adjusted_F: float = F - invalid_neg_pr_sum
         if adjusted_F < 0:
-             # Target F is unachievable even with f=0 for all valid regions.
-             # Set all valid region FPRs to 0 and proceed.
-             print(f"Warning: Target FPR F={F} is too low to be achieved. "
-                   f"Setting remaining valid FPRs to 0.")
-             for i in range(k):
-                 if valid_list[i]:
-                     opt_fpr_list[i] = 0.0
-                 else:
-                     opt_fpr_list[i] = 1.0
-             break # Exit loop
+            # Target F is unachievable even with f=0 for all valid regions.
+            # Set all valid region FPRs to 0 and proceed.
+            print(
+                f"Warning: Target FPR F={F} is too low to be achieved. "
+                f"Setting remaining valid FPRs to 0."
+            )
+            for i in range(k):
+                if valid_list[i]:
+                    opt_fpr_list[i] = 0.0
+                else:
+                    opt_fpr_list[i] = 1.0
+            break  # Exit loop
 
         constant_C: float = adjusted_F / valid_pos_pr_sum
 
@@ -602,7 +587,7 @@ def OptimalFPR(
                     opt_fpr_list[i] = 1.0
                     valid_list[i] = False  # Mark as invalid for next iteration
                     changed_in_iteration = True
-                elif fpr_i < 0.0: # Should not happen if adjusted_F >= 0
+                elif fpr_i < 0.0:  # Should not happen if adjusted_F >= 0
                     # Clamp negative FPR to 0
                     opt_fpr_list[i] = 0.0
                     # Keep it valid for now, maybe other regions compensate.
@@ -617,10 +602,8 @@ def OptimalFPR(
             break
 
     # Final check: Calculate the achieved FPR with the computed opt_fpr_list
-    achieved_F: float = sum(
-        opt_fpr_list[i] * neg_pr_list[i] for i in range(k)
-    )
-    if abs(achieved_F - F) > max(1e-5, F * 0.1): # Allow some tolerance
+    achieved_F: float = sum(opt_fpr_list[i] * neg_pr_list[i] for i in range(k))
+    if abs(achieved_F - F) > max(1e-5, F * 0.1):  # Allow some tolerance
         print(
             f"Warning: OptimalFPR calculation result deviates significantly "
             f"from target F={F}. Achieved F={achieved_F:.6f}. "
@@ -635,7 +618,7 @@ def OptimalFPR(
 
 def SpaceUsed(
     g: prList,
-    h: prList, # h is unused but kept for consistent signature
+    h: prList,  # h is unused but kept for consistent signature
     t: List[float],
     f: List[Optional[float]],
     n: int,
@@ -712,7 +695,7 @@ class PLBF(Generic[KeyType]):
         self,
         predictor: Predictor[KeyType],
         pos_keys: Sequence[KeyType],
-        neg_keys: Sequence[KeyType], # Used for training h distribution
+        neg_keys: Sequence[KeyType],  # Used for training h distribution
         F: float,
         N: int,
         k: int,
@@ -755,9 +738,7 @@ class PLBF(Generic[KeyType]):
 
         # --- Step 2: Divide scores into segments & build prLists ---
         print("Building segment distributions (prList)...")
-        self.segment_thre_list: Final[List[float]] = [
-            i / N for i in range(N + 1)
-        ]
+        self.segment_thre_list: Final[List[float]] = [i / N for i in range(N + 1)]
         self.g: prList = prList(pos_scores, self.segment_thre_list)
         self.h: prList = prList(neg_scores, self.segment_thre_list)
 
@@ -768,10 +749,9 @@ class PLBF(Generic[KeyType]):
         self.memory_usage_of_backup_bf: float = 0.0
         print("Finding optimal thresholds and FPRs...")
         start_fit_time = time.time()
-        self._find_best_t_and_f() # Calls the appropriate DP method
+        self._find_best_t_and_f()  # Calls the appropriate DP method
         end_fit_time = time.time()
         print(f"Threshold/FPR optimization took {end_fit_time - start_fit_time:.2f}s")
-
 
         # --- Step 4: Build Bloom filters and insert keys ---
         # Filters are stored in self.bfs
@@ -781,7 +761,6 @@ class PLBF(Generic[KeyType]):
         self._build_filters(pos_keys, pos_scores)
         end_build_time = time.time()
         print(f"Filter construction took {end_build_time - start_build_time:.2f}s")
-
 
     def _find_best_t_and_f(self) -> None:
         """Finds the best region thresholds (t) and FPRs (f) using standard DP."""
@@ -826,14 +805,12 @@ class PLBF(Generic[KeyType]):
 
         self.t = t_best
         self.f = f_best
-        self.memory_usage_of_backup_bf = (
-            minSpaceUsed if minSpaceUsed != INF else 0.0
-        )
+        self.memory_usage_of_backup_bf = minSpaceUsed if minSpaceUsed != INF else 0.0
 
     def _get_region_idx(self, score: float) -> int:
         """Finds the region index (1 to k) for a given score based on thresholds t."""
         assert 0.0 <= score <= 1.0, f"Score out of bounds: {score}"
-        assert hasattr(self, 't') and self.t, "Thresholds 't' not calculated yet."
+        assert hasattr(self, "t") and self.t, "Thresholds 't' not calculated yet."
 
         # Find i such that t[i-1] < score <= t[i]. Region index is i (1-based).
         # bisect_right finds insertion point `idx` where all elements <= score are to the left.
@@ -848,15 +825,13 @@ class PLBF(Generic[KeyType]):
         self, pos_keys: Sequence[KeyType], pos_scores: List[float]
     ) -> None:
         """Creates Bloom filters and inserts positive keys."""
-        assert hasattr(self, 't') and self.t, "Thresholds 't' not set."
-        assert hasattr(self, 'f') and self.f, "FPRs 'f' not set."
+        assert hasattr(self, "t") and self.t, "Thresholds 't' not set."
+        assert hasattr(self, "f") and self.f, "FPRs 'f' not set."
         assert len(pos_keys) == len(pos_scores)
 
         # Count keys and collect keys falling into each region
         pos_cnt_list: List[int] = [0] * (self.k + 1)  # 1-based index
-        keys_per_region: List[List[KeyType]] = [
-            [] for _ in range(self.k + 1)
-        ]
+        keys_per_region: List[List[KeyType]] = [[] for _ in range(self.k + 1)]
 
         for key, score in zip(pos_keys, pos_scores):
             region_idx: int = self._get_region_idx(score)
@@ -885,7 +860,7 @@ class PLBF(Generic[KeyType]):
                 # For simplicity, we won't create a BF. `contains` must handle f=0.
                 # If neg_pr=0, `contains` should be accurate without BF.
                 # If neg_pr>0, f=0 is theoretically impossible with BF.
-                self.bfs[i] = None # Mark as needing special handling in contains
+                self.bfs[i] = None  # Mark as needing special handling in contains
             elif fpr_i >= 1.0 - EPS:
                 # FPR is effectively 1. No filter needed, always return True.
                 self.bfs[i] = None
@@ -898,7 +873,7 @@ class PLBF(Generic[KeyType]):
                     self.bfs[i] = bf
                 except Exception as e:
                     print(f"Error creating BloomFilter for region {i}: {e}")
-                    self.bfs[i] = None # Failed to create filter
+                    self.bfs[i] = None  # Failed to create filter
 
     def contains(self, key: KeyType) -> bool:
         """
@@ -911,7 +886,7 @@ class PLBF(Generic[KeyType]):
             bool: True if the key might be present (potential positive or false positive),
                   False if the key is definitely not present (true negative).
         """
-        assert hasattr(self, 'bfs'), "Filters not initialized."
+        assert hasattr(self, "bfs"), "Filters not initialized."
         score: float = self._predictor(key)
         assert 0.0 <= score <= 1.0, f"Predictor score out of bounds: {score}"
 
@@ -922,7 +897,7 @@ class PLBF(Generic[KeyType]):
         if fpr_i is None:
             # Should not happen if initialization succeeded. Assume positive?
             print(f"Warning: FPR f[{region_idx}] is None during contains().")
-            return True # Fail safe?
+            return True  # Fail safe?
         elif fpr_i >= 1.0 - EPS:
             # Region has FPR=1. Always return True.
             return True
@@ -989,16 +964,14 @@ class FastPLBF(PLBF[KeyType]):
 
         self.t = t_best
         self.f = f_best
-        self.memory_usage_of_backup_bf = (
-            minSpaceUsed if minSpaceUsed != INF else 0.0
-        )
+        self.memory_usage_of_backup_bf = minSpaceUsed if minSpaceUsed != INF else 0.0
 
 
 # --- Main Execution Block ---
 def main() -> None:
-    """Main function to parse arguments, load data, build filter, and test."""
+    """Main function to parse arguments, load data, train predictor, build filter, and test."""
     parser = argparse.ArgumentParser(
-        description="Construct and test a Fast Partitioned Learned Bloom Filter."
+        description="Construct and test a Partitioned Learned Bloom Filter with a trained predictor."
     )
     parser.add_argument(
         "--data_path",
@@ -1006,7 +979,7 @@ def main() -> None:
         dest="data_path",
         type=str,
         required=True,
-        help="Path of the dataset CSV file (needs 'key', 'score', 'label' columns)",
+        help="Path of the dataset CSV file (needs 'key', 'label' columns)",
     )
     parser.add_argument(
         "--N",
@@ -1033,12 +1006,20 @@ def main() -> None:
         help="F: The target overall false positive rate",
     )
     parser.add_argument(
-        "--test_split",
+        "--plbf_test_split",
         action="store",
-        dest="test_split",
+        dest="plbf_test_split",
         type=float,
         default=0.7,
-        help="Fraction of negative samples to use for testing (default: 0.7)",
+        help="Fraction of negative samples held out for PLBF testing (vs predictor train + h-learn) (default: 0.7)",
+    )
+    parser.add_argument(
+        "--predictor_neg_split",
+        action="store",
+        dest="predictor_neg_split",
+        type=float,
+        default=0.5,
+        help="Fraction of non-test negative samples used for predictor training (vs h-learning) (default: 0.5)",
     )
     parser.add_argument(
         "--seed",
@@ -1051,40 +1032,45 @@ def main() -> None:
     parser.add_argument(
         "--use_fast_dp",
         action="store_true",
-        default=True,
-        help="Use the FastPLBF (O(N^2k) DP) implementation as opposed to standard PLBF (O(NklogN) DP). Default is FastPLBF.",
+        help="Use the FastPLBF implementation (O(NklogN) DP). Default is standard PLBF (O(N^2k) DP).",
+    )
+    parser.add_argument(
+        "--hash_features",
+        action="store",
+        dest="hash_features",
+        type=int,
+        default=2**16,  # Default number of features for HashingVectorizer
+        help="Number of features for HashingVectorizer (default: 65536)",
     )
 
     results: argparse.Namespace = parser.parse_args()
 
-    DATA_PATH: str = results.data_path
-    N_param: int = results.N
-    k_param: int = results.k
-    F_param: float = results.F
-    TEST_SPLIT: float = results.test_split
-    SEED: int = results.seed
-    USE_FAST: bool = results.use_fast_dp
+    DATA_PATH: Final[str] = results.data_path
+    N_param: Final[int] = results.N
+    k_param: Final[int] = results.k
+    F_param: Final[float] = results.F
+    PLBF_TEST_SPLIT: Final[float] = results.plbf_test_split
+    PREDICTOR_NEG_SPLIT: Final[float] = results.predictor_neg_split
+    SEED: Final[int] = results.seed
+    USE_FAST: Final[bool] = results.use_fast_dp
+    HASH_FEATURES: Final[int] = results.hash_features
 
     # --- Data Loading and Preparation ---
     print(f"Loading data from: {DATA_PATH}")
     try:
+        # Now only requires 'key' and 'label'
         data: pd.DataFrame = pd.read_csv(DATA_PATH)
-        # Ensure required columns exist
-        required_cols: set[str] = {'key', 'score', 'label'}
+        required_cols: Final[set[str]] = {"key", "label"}
         if not required_cols.issubset(data.columns):
-            raise ValueError(
-                f"CSV must contain columns: {', '.join(required_cols)}"
-            )
-        # Ensure scores are numeric and within [0, 1]
-        data['score'] = pd.to_numeric(data['score'], errors='coerce')
-        if data['score'].isnull().any():
-            raise ValueError("Non-numeric values found in 'score' column.")
-        if not ((data['score'] >= 0) & (data['score'] <= 1)).all():
-            raise ValueError("Scores must be between 0 and 1.")
+            raise ValueError(f"CSV must contain columns: {', '.join(required_cols)}")
+        # Convert key to string just in case
+        data["key"] = data["key"].astype(str)
         # Ensure labels are numeric (typically 1 for positive, others negative)
-        data['label'] = pd.to_numeric(data['label'], errors='coerce')
-        if data['label'].isnull().any():
+        data["label"] = pd.to_numeric(data["label"], errors="coerce")
+        if data["label"].isnull().any():
             raise ValueError("Non-numeric values found in 'label' column.")
+        # Convert labels to binary (1 for positive, 0 for negative) for predictor training
+        data["binary_label"] = (data["label"] == 1).astype(int)
 
     except FileNotFoundError:
         print(f"Error: Data file not found at {DATA_PATH}")
@@ -1097,149 +1083,252 @@ def main() -> None:
         exit(1)
 
     # Separate positive and negative samples
-    positive_sample: pd.DataFrame = data.loc[(data["label"] == 1)]
-    negative_sample: pd.DataFrame = data.loc[(data["label"] != 1)]
+    positive_sample: pd.DataFrame = data.loc[(data["binary_label"] == 1)].copy()
+    negative_sample: pd.DataFrame = data.loc[(data["binary_label"] == 0)].copy()
 
     if len(positive_sample) == 0:
         print("Error: No positive samples (label=1) found in the data.")
         exit(1)
+
+    # --- Split Data for Predictor Training and PLBF ---
+    # We need negatives for:
+    # 1. Training the predictor (along with positives)
+    # 2. Learning the PLBF h-distribution
+    # 3. Testing the final PLBF FPR
+
+    neg_plbf_test: pd.DataFrame  # Hold out final test negatives first
+    neg_for_pred_and_h: pd.DataFrame  # Remaining negatives
+
     if len(negative_sample) == 0:
         print(
-            "Warning: No negative samples (label!=1) found."
-            " FPR calculation might be trivial or inaccurate."
+            "Warning: No negative samples found. Cannot train predictor or evaluate FPR accurately."
         )
-        # Create dummy negative sample for code structure if needed
-        train_negative: pd.DataFrame = negative_sample
-        test_negative: pd.DataFrame = negative_sample
+        neg_plbf_test = negative_sample.copy()
+        neg_for_pred_and_h = negative_sample.copy()
     else:
-        # Split negatives into train (for learning h) and test (for evaluation)
-        train_negative, test_negative = train_test_split(
-            negative_sample, test_size=TEST_SPLIT, random_state=SEED
+        # Split negatives: Hold out PLBF_TEST_SPLIT fraction for final testing
+        neg_for_pred_and_h, neg_plbf_test = train_test_split(
+            negative_sample, test_size=PLBF_TEST_SPLIT, random_state=SEED
         )
 
-    # Prepare key lists
-    pos_keys: List[Any] = list(positive_sample["key"])
-    # Use training negatives for building the filter's h distribution
-    train_neg_keys: List[Any] = list(train_negative["key"])
-    # Use testing negatives for evaluating the actual FPR
-    test_neg_keys: List[Any] = list(test_negative["key"])
+    # Further split the remaining negatives for predictor training vs h-learning
+    neg_train_pred: pd.DataFrame
+    neg_plbf_h_learn: pd.DataFrame
+    if len(neg_for_pred_and_h) == 0:
+        neg_train_pred = neg_for_pred_and_h.copy()
+        neg_plbf_h_learn = neg_for_pred_and_h.copy()
+    else:
+        # Use PREDICTOR_NEG_SPLIT ratio on the neg_for_pred_and_h set
+        neg_train_pred, neg_plbf_h_learn = train_test_split(
+            neg_for_pred_and_h,
+            train_size=PREDICTOR_NEG_SPLIT,
+            random_state=SEED + 1,  # Use different seed offset
+        )
 
-    # --- Create Predictor Function ---
-    # In a real scenario, this would be your trained model or scoring function.
-    # Here, we simulate it by looking up pre-computed scores from the CSV.
-    score_lookup: Dict[Any, float] = dict(zip(data['key'], data['score']))
-    def csv_predictor(key: Any) -> float:
-        """Simulated predictor looking up scores from the loaded CSV."""
-        return score_lookup.get(key, 0.0) # Default score if key not found?
+    print(f"Total positive samples: {len(positive_sample)}")
+    print(f"Total negative samples: {len(negative_sample)}")
+    print(f"  - Negatives for predictor training: {len(neg_train_pred)}")
+    print(f"  - Negatives for PLBF h-distribution learning: {len(neg_plbf_h_learn)}")
+    print(f"  - Negatives for PLBF final testing: {len(neg_plbf_test)}")
+    assert len(neg_train_pred) + len(neg_plbf_h_learn) + len(neg_plbf_test) == len(
+        negative_sample
+    )
 
-    predictor_func: Predictor[Any] = csv_predictor
+    # --- Train Predictor ---
+    print(
+        f"\nTraining predictor model (Logistic Regression with {HASH_FEATURES} hash features)..."
+    )
+    # Prepare data for predictor training (positives + subset of negatives)
+    train_pred_data = pd.concat([positive_sample, neg_train_pred])
+    X_train_pred: pd.Series = train_pred_data[
+        "key"
+    ]  # Features are the keys (will be hashed)
+    y_train_pred: pd.Series = train_pred_data["binary_label"]  # Target is 0 or 1
 
-    print(f"Positive samples: {len(pos_keys)}")
-    print(f"Training negative samples: {len(train_neg_keys)}")
-    print(f"Testing negative samples: {len(test_neg_keys)}")
-    print(f"Parameters: N={N_param}, k={k_param}, F={F_param}")
-    print(f"Using {'Fast DP' if USE_FAST else 'Standard DP'} implementation.")
+    # Define model pipeline: HashingVectorizer -> LogisticRegression
+    # HashingVectorizer converts text keys to sparse feature vectors
+    # LogisticRegression naturally outputs probabilities via predict_proba
+    predictor_model: Pipeline = Pipeline(
+        [
+            (
+                "vectorizer",
+                HashingVectorizer(
+                    n_features=HASH_FEATURES, alternate_sign=False, ngram_range=(1, 3)
+                ),
+            ),  # Use 1-3 char ngrams
+            (
+                "classifier",
+                LogisticRegression(
+                    solver="liblinear", random_state=SEED, class_weight="balanced"
+                ),
+            ),  # liblinear good for sparse, balanced for potential imbalance
+        ]
+    )
+
+    start_pred_train_time: float = time.time()
+    try:
+        predictor_model.fit(X_train_pred, y_train_pred)
+        print("Predictor training complete.")
+    except Exception as e:
+        print(f"Error training predictor model: {e}")
+        exit(1)
+    end_pred_train_time: float = time.time()
+    print(f"Predictor training took {end_pred_train_time - start_pred_train_time:.2f}s")
+
+    # --- Define the Predictor Function for PLBF ---
+    # This function encapsulates feature extraction and prediction
+    # Using a cache can speed up repeated predictions for the same key during PLBF construction
+    prediction_cache: Dict[Any, float] = {}
+
+    def trained_predictor(key: KeyType) -> float:
+        """
+        Predictor function using the trained model.
+        Takes a key, returns a score [0, 1] (probability of being positive).
+        Uses a simple cache for efficiency.
+        """
+        # Check cache first
+        if key in prediction_cache:
+            return prediction_cache[key]
+
+        # Ensure key is in a sequence/iterable for the vectorizer/pipeline
+        key_iterable: List[str] = [str(key)]  # Convert to string and put in a list
+        positive_prob: float = 0.0  # Default score
+        try:
+            # predict_proba returns [[prob_class_0, prob_class_1]]
+            proba: np.ndarray = predictor_model.predict_proba(key_iterable)
+            # Return the probability of the positive class (class 1)
+            positive_prob = float(proba[0, 1])  # Ensure it's a standard float
+        except NotFittedError:
+            print("Error: Predictor model called before fitting.")
+            # Return a default score or raise error? Returning default might hide issues.
+            raise RuntimeError("Predictor model not fitted!")
+        except Exception as e:
+            print(f"Error during prediction for key '{key}': {e}")
+            # Return default score on error? Might skew results.
+            # Consider raising an error or logging more details.
+
+        # Store in cache and return
+        prediction_cache[key] = positive_prob
+        return positive_prob
+
+    predictor_func: Predictor[KeyType] = trained_predictor
+
+    # --- Prepare Key Lists for PLBF ---
+    pos_keys: List[KeyType] = list(positive_sample["key"])
+    # Use negatives reserved for h-distribution learning
+    neg_keys_h_learn: List[KeyType] = list(neg_plbf_h_learn["key"])
+    # Use negatives reserved for final testing
+    neg_keys_final_test: List[KeyType] = list(neg_plbf_test["key"])
 
     # --- Construct PLBF ---
-    print("Constructing PLBF...")
+    print(f"\nConstructing {'FastPLBF' if USE_FAST else 'PLBF'}...")
+    print(f"Parameters: N={N_param}, k={k_param}, F={F_param}")
     total_construct_start: float = time.time()
-    plbf_instance: PLBF[Any]
+    plbf_instance: PLBF[KeyType]
     try:
-        if USE_FAST:
-            plbf_instance = FastPLBF(
-                predictor=predictor_func,
-                pos_keys=pos_keys,
-                neg_keys=train_neg_keys, # Use train negatives to learn h
-                F=F_param,
-                N=N_param,
-                k=k_param,
-            )
-        else:
-            plbf_instance = PLBF(
-                predictor=predictor_func,
-                pos_keys=pos_keys,
-                neg_keys=train_neg_keys,
-                F=F_param,
-                N=N_param,
-                k=k_param,
-            )
+        PLBFClass: type = FastPLBF if USE_FAST else PLBF
+        plbf_instance = PLBFClass(
+            predictor=predictor_func,
+            pos_keys=pos_keys,
+            neg_keys=neg_keys_h_learn,  # Use h-learning negatives here
+            F=F_param,
+            N=N_param,
+            k=k_param,
+        )
     except RuntimeError as e:
         print(f"Error during PLBF construction: {e}")
         exit(1)
     except Exception as e:
         print(f"An unexpected error occurred during construction: {e}")
         import traceback
+
         traceback.print_exc()
         exit(1)
 
     total_construct_end: float = time.time()
+    # Construction time reported by PLBF includes score computation, fitting, building filters
+    # This total time includes data prep and predictor training as well.
     print(
-        "Construction finished in "
-        f"{total_construct_end - total_construct_start:.4f} seconds (total)."
+        "Total time including predictor training and PLBF construction: "
+        f"{total_construct_end - start_pred_train_time:.4f} seconds."
     )
 
     # --- Verification: No False Negatives ---
-    print("Verifying no false negatives...")
+    print("\nVerifying no false negatives...")
     fn_cnt: int = 0
+    verify_start_time = time.time()
     for key in pos_keys:
         if not plbf_instance.contains(key):
-            # print(f"False Negative detected: Key={key}, Score={predictor_func(key)}")
+            # score = predictor_func(key) # Get score for debugging if needed
+            # print(f"False Negative detected: Key={key}, Score={score:.4f}")
             fn_cnt += 1
+    verify_end_time = time.time()
     if fn_cnt == 0:
-        print("Verification successful: No false negatives found.")
+        print(
+            f"Verification successful: No false negatives found ({verify_end_time - verify_start_time:.2f}s)."
+        )
     else:
         print(
-            f"Error: {fn_cnt} false negatives detected out of {len(pos_keys)}."
+            f"Error: {fn_cnt} false negatives detected out of {len(pos_keys)} ({verify_end_time - verify_start_time:.2f}s)."
         )
 
     # --- Testing: False Positive Rate ---
-    print("Calculating false positive rate on test set...")
+    print("\nCalculating false positive rate on final test set...")
     fp_cnt: int = 0
-    if len(test_neg_keys) > 0:
-        for key in test_neg_keys:
+    test_start_time = time.time()
+    if len(neg_keys_final_test) > 0:
+        for key in neg_keys_final_test:
             if plbf_instance.contains(key):
                 fp_cnt += 1
-        measured_fpr: float = fp_cnt / len(test_neg_keys)
+        measured_fpr: float = fp_cnt / len(neg_keys_final_test)
     else:
+        print("Warning: No final test negative keys available to measure FPR.")
         measured_fpr = 0.0  # No test negatives to measure FPR
+    test_end_time = time.time()
+    print(f"FPR calculation took {test_end_time - test_start_time:.2f}s.")
 
     # --- Output Results ---
     print("\n--- Results ---")
     print(f"Target Overall FPR (F): {F_param:.6f}")
     print(
         f"Measured FPR on test set: {measured_fpr:.6f} "
-        f"[{fp_cnt} / {len(test_neg_keys)}]"
-    )
-    print(
-        "Total Construction Time: "
-        f"{total_construct_end - total_construct_start:.4f} seconds"
+        f"[{fp_cnt} / {len(neg_keys_final_test)}]"
     )
     # Convert bits to KiB or MiB for readability
     mem_bits: float = plbf_instance.memory_usage_of_backup_bf
     mem_kib: float = mem_bits / 8.0 / 1024.0
     mem_mib: float = mem_kib / 1024.0
     if mem_mib >= 1.0:
-        print(
-            f"Memory Usage of Backup BFs: {mem_mib:.2f} MiB "
-            f"({mem_bits:.0f} bits)"
-        )
+        print(f"Memory Usage of Backup BFs: {mem_mib:.2f} MiB ({mem_bits:.0f} bits)")
+    elif mem_kib >= 0.01:  # Show KiB if reasonably large
+        print(f"Memory Usage of Backup BFs: {mem_kib:.2f} KiB ({mem_bits:.0f} bits)")
     else:
-        print(
-            f"Memory Usage of Backup BFs: {mem_kib:.2f} KiB "
-            f"({mem_bits:.0f} bits)"
-        )
+        print(f"Memory Usage of Backup BFs: {mem_bits:.1f} bits")
 
     print("\nOptimal Thresholds (t):")
-    print([f"{th:.4f}" for th in plbf_instance.t])
+    # Check if thresholds exist before printing
+    if hasattr(plbf_instance, "t") and plbf_instance.t:
+        print([f"{th:.4f}" for th in plbf_instance.t])
+    else:
+        print("Thresholds not available.")
+
     print("\nOptimal FPRs per Region (f):")
-    # Format FPRs nicely (handle None)
-    f_formatted: List[str] = ["None"] + [
-        f"{fpr:.4e}" if fpr is not None else "None"
-        for fpr in plbf_instance.f[1:]
-    ]
-    print(f_formatted)
+    # Check if FPRs exist before printing
+    if hasattr(plbf_instance, "f") and plbf_instance.f:
+        # Format FPRs nicely (handle None)
+        f_formatted: List[str] = ["None"] + [
+            f"{fpr:.4e}" if fpr is not None else "None" for fpr in plbf_instance.f[1:]
+        ]
+        print(f_formatted)
+    else:
+        print("FPRs not available.")
     print("----------------")
 
 
+# Note: The PLBF/FastPLBF class definitions are assumed to be defined above this point.
 if __name__ == "__main__":
+    # Add necessary imports if running standalone
+    from typing import Optional, Generic  # Already imported
+
+    # Add placeholder classes if needed (already included above)
     main()
