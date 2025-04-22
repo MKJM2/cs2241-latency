@@ -1436,6 +1436,10 @@ def main() -> None:
     else:
         print(f"Memory Usage of Backup BFs: {mem_bits:.1f} bits")
 
+    print(
+        f"Total Memory Usage of PLBF (Backup BFs + Predictor): {plbf_instance.get_actual_size_bytes()}"
+    )
+
     print("\nOptimal Thresholds (t):")
     # Check if thresholds exist before printing
     if hasattr(plbf_instance, "t") and plbf_instance.t:
