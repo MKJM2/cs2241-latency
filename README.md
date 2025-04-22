@@ -69,11 +69,11 @@ options:
 
 **Example:**
 
-Assuming you have a dataset `data/my_dataset.csv`:
+Assuming you have a dataset `data/url_dataset.csv`:
 
 ```bash
 python fast_plbf.py \
-    --data_path data/my_dataset.csv \
+    --data_path data/url_dataset.csv \
     --N 1000 \
     --k 10 \
     --F 0.01 \
@@ -83,7 +83,7 @@ python fast_plbf.py \
 ```
 
 This command will:
-*   Load data from `data/my_dataset.csv`.
+*   Load data from `data/url_dataset.csv`.
 *   Use N=1000 initial segments for score discretization.
 *   Create k=10 final regions (partitions).
 *   Target an overall False Positive Rate (FPR) of F=0.01.
@@ -92,6 +92,20 @@ This command will:
 *   Use the faster DP algorithm (`FastPLBF`) for optimization (this is the default). To use the standard DP, remove the `--use_fast_dp` flag or explicitly set it if the default changes.
 
 The script will output the construction time, verification results (checking for false negatives), the measured FPR on the test set, the estimated memory usage of the backup Bloom filters, and the calculated optimal thresholds (`t`) and FPRs per region (`f`).
+
+
+## Datasets used for experiments
+
+### URL
+As per the PLBF and FastPLBF literature, we use the [Malicious URLs Dataset](https://www.kaggle.com/datasets/sid321axn/malicious-urls-dataset)
+we acquired from: 
+```
+```
+Manu Siddhartha. Malicious urls dataset | kaggle. URL
+https://www.kaggle.com/datasets/sid321axn/malicious-urls-dataset [Online; accessed
+22-April-2025], 2025.
+```
+```
 
 ## Project Structure
 

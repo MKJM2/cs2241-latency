@@ -172,3 +172,11 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Don't check in datasets
+data/*.csv
+data/
+
+# MacOS Things
+.DS_Store
+*/.DS_Store
