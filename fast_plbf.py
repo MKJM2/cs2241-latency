@@ -15,7 +15,12 @@ from typing import (
     Sequence,
 )
 import pandas as pd
+import numpy as np
 from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import HashingVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.exceptions import NotFittedError
 from bloom_filter import BloomFilter
 
 
@@ -1148,7 +1153,7 @@ def main() -> None:
     # Define model pipeline: HashingVectorizer -> LogisticRegression
     # HashingVectorizer converts text keys to sparse feature vectors
     # LogisticRegression naturally outputs probabilities via predict_proba
-    predictor_model: Pipeline = Pipeline(
+    predictor_model = Pipeline(
         [
             (
                 "vectorizer",
@@ -1180,7 +1185,7 @@ def main() -> None:
     # Using a cache can speed up repeated predictions for the same key during PLBF construction
     prediction_cache: Dict[Any, float] = {}
 
-    def trained_predictor(key: KeyType) -> float:
+    def trained_predictor(key: str) -> float:
         """
         Predictor function using the trained model.
         Takes a key, returns a score [0, 1] (probability of being positive).
@@ -1211,20 +1216,20 @@ def main() -> None:
         prediction_cache[key] = positive_prob
         return positive_prob
 
-    predictor_func: Predictor[KeyType] = trained_predictor
+    predictor_func: Predictor[str] = trained_predictor
 
     # --- Prepare Key Lists for PLBF ---
-    pos_keys: List[KeyType] = list(positive_sample["key"])
+    pos_keys: List[str] = list(positive_sample["key"])
     # Use negatives reserved for h-distribution learning
-    neg_keys_h_learn: List[KeyType] = list(neg_plbf_h_learn["key"])
+    neg_keys_h_learn: List[str] = list(neg_plbf_h_learn["key"])
     # Use negatives reserved for final testing
-    neg_keys_final_test: List[KeyType] = list(neg_plbf_test["key"])
+    neg_keys_final_test: List[str] = list(neg_plbf_test["key"])
 
     # --- Construct PLBF ---
     print(f"\nConstructing {'FastPLBF' if USE_FAST else 'PLBF'}...")
     print(f"Parameters: N={N_param}, k={k_param}, F={F_param}")
     total_construct_start: float = time.time()
-    plbf_instance: PLBF[KeyType]
+    plbf_instance: PLBF[str]
     try:
         PLBFClass: type = FastPLBF if USE_FAST else PLBF
         plbf_instance = PLBFClass(
