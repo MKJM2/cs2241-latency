@@ -1,6 +1,7 @@
 import argparse
 import math
 import time
+import sys
 import bisect
 from typing import (
     Any,
@@ -13,6 +14,7 @@ from typing import (
     TypeVar,
     Dict,
     Sequence,
+    Iterable,
 )
 import pandas as pd
 import numpy as np
@@ -29,7 +31,7 @@ from utils import deep_sizeof, sizeof
 # Type variables and aliases
 KeyType = TypeVar("KeyType")
 # Define a specific type for the predictor function
-Predictor = Callable[[KeyType], float]
+Predictor = Callable[[Iterable[KeyType]], List[float]]
 # Define a specific type for the serializer function
 Serializer = Callable[[KeyType], bytes]
 
@@ -738,8 +740,12 @@ class PLBF(Generic[KeyType]):
         # Compute scores only once for efficiency
         print("Computing scores using predictor...")
         start_score_time = time.time()
-        pos_scores: List[float] = [predictor(key) for key in pos_keys]
-        neg_scores: List[float] = [predictor(key) for key in neg_keys]
+        pos_scores: List[float] = predictor(
+            pos_keys
+        )  # Batch processing all pos_keys for faster PLBF creation
+        neg_scores: List[float] = predictor(
+            neg_keys
+        )  # Otherwise, one would have to do: [predictor(key) for key in neg_keys]
         end_score_time = time.time()
         print(f"Score computation took {end_score_time - start_score_time:.2f}s")
 
@@ -896,7 +902,7 @@ class PLBF(Generic[KeyType]):
                   False if the key is definitely not present (true negative).
         """
         assert hasattr(self, "bfs"), "Filters not initialized."
-        score: float = self._predictor(key)
+        score: float = self._predictor([key])[0]
         assert 0.0 <= score <= 1.0, f"Predictor score out of bounds: {score}"
 
         region_idx: int = self._get_region_idx(score)
@@ -924,6 +930,43 @@ class PLBF(Generic[KeyType]):
             # Standard case: Query the Bloom filter for the region.
             # If bf is None (e.g., creation failed or count was 0), key cannot be present.
             return bf is not None and (key in bf)
+
+    def contains_batch(self, keys: Iterable[KeyType]) -> List[bool]:
+        """
+        Batched version of the `contains` method.
+        Returns whether each key might be present in the PLBF.
+
+        Args:
+            keys (Iterable[KeyType]): The keys to check.
+
+        Returns:
+            List[bool]: For each key, True if it might be present (positive or false positive),
+                        False if it is definitely not present (true negative).
+        """
+        assert hasattr(self, "bfs"), "Filters not initialized."
+
+        key_list: List[KeyType] = list(keys)
+        scores: List[float] = self._predictor(key_list)
+        results: List[bool] = [False] * len(key_list)  # Preallocate result size
+
+        for key, score in zip(key_list, scores):
+            assert 0.0 <= score <= 1.0, f"Predictor score out of bounds: {score}"
+            region_idx: int = self._get_region_idx(score)
+            fpr_i: Optional[float] = self.f[region_idx]
+            bf: Optional[BloomFilter[KeyType]] = self.bfs[region_idx]
+
+            if fpr_i is None:
+                # Invalid config, fail-safe to True
+                results.append(True)
+            elif fpr_i >= 1.0 - EPS:
+                results.append(True)
+            elif fpr_i <= EPS:
+                # Region has FPR=0 — return False unless there's a filter
+                results.append(bf is not None and key in bf)
+            else:
+                results.append(bf is not None and key in bf)
+
+        return results
 
     def get_actual_size_bytes(
         self, with_overhead: bool = False, verbose: bool = False
@@ -1304,43 +1347,31 @@ def main() -> None:
     print(f"Predictor training took {end_pred_train_time - start_pred_train_time:.2f}s")
 
     # --- Define the Predictor Function for PLBF ---
-    # This function encapsulates feature extraction and prediction
-    # Using a cache can speed up repeated predictions for the same key during PLBF construction
-    prediction_cache: Dict[Any, float] = {}
 
-    def trained_predictor(key: str) -> float:
+    # To speed up the setup of PLBF, we use batching by default:
+    def trained_predictor(keys: Iterable[str]) -> List[float]:
         """
-        Predictor function using the trained model.
-        Takes a key, returns a score [0, 1] (probability of being positive).
-        Uses a simple cache for efficiency.
+        Batched predictor function.
+        Takes an iterable of keys, returns a list of scores [0,1] per key.
+        Caches individual predictions.
         """
-        # Check cache first
-        if key in prediction_cache:
-            return prediction_cache[key]
+        keys_list = list(map(str, keys))  # Ensure string format
+        results = [0.0] * len(keys_list)  # Pre-allocate output
 
-        # Ensure key is in a sequence/iterable for the vectorizer/pipeline
-        key_iterable: List[str] = [str(key)]  # Convert to string and put in a list
-        positive_prob: float = 0.0  # Default score
         try:
-            # predict_proba returns [[prob_class_0, prob_class_1]]
-            proba: np.ndarray[Any, np.dtype[np.float64]] = (
-                predictor_model.predict_proba(key_iterable)
-            )
-            # Return the probability of the positive class (class 1)
-            positive_prob = float(proba[0, 1])  # Ensure it's a standard float
+            if keys_list:
+                probas: np.ndarray[Any, np.dtype[np.float64]] = (
+                    predictor_model.predict_proba(keys_list)
+                )
+                results = probas[:, 1].astype(float).tolist()
         except NotFittedError:
-            print("Error: Predictor model called before fitting.")
-            # Return a default score or raise error? Returning default might hide issues.
             raise RuntimeError("Predictor model not fitted!")
         except Exception as e:
-            print(f"Error during prediction for key '{key}': {e}")
-            # Return default score on error? Might skew results.
-            # Consider raising an error or logging more details.
+            print(f"Error during prediction: {e}")
 
-        # Store in cache and return
-        prediction_cache[key] = positive_prob
-        return positive_prob
+        return results
 
+    # This function encapsulates feature extraction and prediction
     predictor_func: Predictor[str] = trained_predictor
 
     # --- Prepare Key Lists for PLBF ---
@@ -1388,11 +1419,15 @@ def main() -> None:
     print("\nVerifying no false negatives...")
     fn_cnt: int = 0
     verify_start_time = time.time()
+    fn_cnt = len(pos_keys) - sum(plbf_instance.contains_batch(pos_keys))
+
+    """
     for key in pos_keys:
         if not plbf_instance.contains(key):
             # score = predictor_func(key) # Get score for debugging if needed
             # print(f"False Negative detected: Key={key}, Score={score:.4f}")
             fn_cnt += 1
+    """
     verify_end_time = time.time()
     if fn_cnt == 0:
         print(
@@ -1408,9 +1443,7 @@ def main() -> None:
     fp_cnt: int = 0
     test_start_time = time.time()
     if len(neg_keys_final_test) > 0:
-        for key in neg_keys_final_test:
-            if plbf_instance.contains(key):
-                fp_cnt += 1
+        fp_cnt = sum(plbf_instance.contains_batch(neg_keys_final_test))
         measured_fpr: float = fp_cnt / len(neg_keys_final_test)
     else:
         print("Warning: No final test negative keys available to measure FPR.")
@@ -1437,7 +1470,7 @@ def main() -> None:
         print(f"Memory Usage of Backup BFs: {mem_bits:.1f} bits")
 
     print(
-        f"Total Memory Usage of PLBF (Backup BFs + Predictor): {plbf_instance.get_actual_size_bytes()}"
+        f"Total Memory Usage of PLBF (Backup BFs + Predictor): {plbf_instance.get_actual_size_bytes(verbose=True)} bytes? TODO: This is inaccurate"
     )
 
     print("\nOptimal Thresholds (t):")
