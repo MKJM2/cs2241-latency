@@ -173,9 +173,8 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# Don't check in datasets
-data/*.csv
-data/
+# Don't check in encoded datasets
+data/*.zip
 
 # MacOS Things
 .DS_Store
