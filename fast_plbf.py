@@ -12,7 +12,6 @@ from typing import (
     Optional,
     Tuple,
     TypeVar,
-    Dict,
     Sequence,
     Iterable,
 )
@@ -24,7 +23,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.exceptions import NotFittedError
 
-from bloom_filter import BloomFilter
+from bloom_filter import BloomFilter, Serializer
 from utils import deep_sizeof, sizeof
 
 
@@ -32,8 +31,6 @@ from utils import deep_sizeof, sizeof
 KeyType = TypeVar("KeyType")
 # Define a specific type for the predictor function
 Predictor = Callable[[Iterable[KeyType]], List[float]]
-# Define a specific type for the serializer function
-Serializer = Callable[[KeyType], bytes]
 
 # Constants
 EPS: Final[float] = 1e-8
@@ -703,10 +700,10 @@ class PLBF(Generic[KeyType]):
         predictor: Predictor[KeyType],
         pos_keys: Sequence[KeyType],
         neg_keys: Sequence[KeyType],  # Used for training h distribution
-        serializer: Serializer[KeyType],
         F: float,
         N: int,
         k: int,
+        serializer: Optional[Serializer[KeyType]] = None,
     ) -> None:
         """
         Initializes the PLBF.
@@ -730,7 +727,7 @@ class PLBF(Generic[KeyType]):
 
         # --- Store Core Parameters ---
         self._predictor: Final[Predictor[KeyType]] = predictor
-        self._serializer: Serializer[KeyType] = serializer
+        self._serializer: Final[Optional[Serializer[KeyType]]] = serializer
         self.F: Final[float] = F
         self.N: Final[int] = N
         self.k: Final[int] = k
@@ -1390,7 +1387,6 @@ def main() -> None:
         PLBFClass: type = FastPLBF if USE_FAST else PLBF
         plbf_instance = PLBFClass(
             predictor=predictor_func,
-            serializer=lambda s: s.encode("utf-8"),
             pos_keys=pos_keys,
             neg_keys=neg_keys_h_learn,  # Use h-learning negatives here
             F=F_param,
@@ -1498,10 +1494,5 @@ def main() -> None:
     print("----------------")
 
 
-# Note: The PLBF/FastPLBF class definitions are assumed to be defined above this point.
 if __name__ == "__main__":
-    # Add necessary imports if running standalone
-    from typing import Optional, Generic  # Already imported
-
-    # Add placeholder classes if needed (already included above)
     main()

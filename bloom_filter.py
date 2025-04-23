@@ -3,6 +3,7 @@ import argparse
 import math
 import time
 import xxhash  # type: ignore[import-not-found]
+import struct
 from bitarray import bitarray  # type: ignore[import-not-found]
 from typing import (
     Callable,
@@ -11,9 +12,12 @@ from typing import (
     List,
     Tuple,
     TypeVar,
+    Optional,
 )
 import pandas as pd
 from sklearn.model_selection import train_test_split
+
+from utils import sizeof
 
 # --- Type variables and aliases ---
 KeyType = TypeVar("KeyType")
@@ -46,7 +50,7 @@ class BloomFilter(Generic[KeyType]):
     __slots__ = (
         "capacity",
         "error_rate",
-        "serializer",  # Added serializer
+        "serializer",
         "size",
         "num_hashes",
         "bit_array",
@@ -59,7 +63,10 @@ class BloomFilter(Generic[KeyType]):
     _BytesHasher = Callable[[bytes], int]
 
     def __init__(
-        self, capacity: int, error_rate: float, serializer: Serializer[KeyType]
+        self,
+        capacity: int,
+        error_rate: float,
+        serializer: Optional[Serializer[KeyType]] = None,
     ):
         """
         Initializes the generic Bloom filter.
@@ -67,20 +74,25 @@ class BloomFilter(Generic[KeyType]):
         Args:
             capacity: The expected number of items to be stored (n).
             error_rate: The desired false positive probability (p), e.g., 0.001.
-            serializer: A function that takes an item of KeyType and returns bytes.
+            serializer: An optional function that takes an item of KeyType and returns bytes.
+                        If None, built-in support for int, float, str, bytes is used.
 
         Raises:
             ValueError: If capacity is non-positive or error_rate is not in (0, 1).
-            TypeError: If serializer is not callable.
+            TypeError: If serializer is provided but not callable, or if an
+                       unsupported key type is encountered at insertion.
         """
         if not capacity > 0:
             raise ValueError("Capacity must be positive")
         if not 0 < error_rate < 1:
             raise ValueError("Error rate must be between 0 and 1")
 
+        if serializer is None:
+            serializer = self._default_serializer
+        self.serializer: Final[Serializer[KeyType]] = serializer
+
         self.capacity: Final[int] = capacity
         self.error_rate: Final[float] = error_rate
-        self.serializer: Final[Serializer[KeyType]] = serializer
 
         size, num_hashes = self._calculate_optimal_params(capacity, error_rate)
         self.size: Final[int] = size
@@ -99,6 +111,25 @@ class BloomFilter(Generic[KeyType]):
         )
         self._hasher2_intdigest: BloomFilter._BytesHasher = (
             lambda b: xxhash.xxh64_intdigest(b, seed=XXH_SEED2)
+        )
+
+    @staticmethod
+    def _default_serializer(item: KeyType) -> bytes:
+        """
+        Default serialization for int, float, str, bytes.
+        Raises TypeError on other types.
+        """
+        if isinstance(item, (bytes, bytearray)):
+            return bytes(item)  # no-op
+        if isinstance(item, str):
+            return item.encode("utf-8")
+        if isinstance(item, float): # float: 8-byte IEEE-754 big-endian
+            return struct.pack(">d", item)
+        if isinstance(item, int): # int: two's-complement 64-bit little-endian
+            return item.to_bytes(8, byteorder="little", signed=True)
+        raise TypeError(
+            f"No default serializer for type {type(item).__name__}; "
+            "please provide a custom serializer"
         )
 
     @staticmethod
@@ -125,19 +156,19 @@ class BloomFilter(Generic[KeyType]):
 
     def _add_indices(self, indices: List[int]) -> None:
         """Sets the bits at the given indices in the bit array."""
-        bit_arr: bitarray = self.bit_array  # Local reference slight optimization
+        bit_arr: bitarray = self.bit_array
         for index in indices:
             bit_arr[index] = 1
 
     def _check_indices(self, indices: List[int]) -> bool:
         """Checks if all bits at the given indices are set."""
-        bit_arr: bitarray = self.bit_array  # Local reference
+        bit_arr: bitarray = self.bit_array
         for index in indices:
             if not bit_arr[index]:
                 return False  # Definitely not present (early exit)
         return True  # Possibly present
 
-    # --- Public Add/Contains Methods (Generic) ---
+    # --- Public Add/Contains Methods ---
 
     def add(self, item: KeyType) -> None:
         """
@@ -152,7 +183,6 @@ class BloomFilter(Generic[KeyType]):
         try:
             item_bytes: bytes = self.serializer(item)
         except Exception as e:
-            # Catch potential errors during serialization
             raise TypeError(
                 f"Failed to serialize item of type {type(item).__name__} with provided serializer: {e}"
             ) from e
@@ -244,7 +274,7 @@ class BloomFilter(Generic[KeyType]):
         )
 
 
-# --- Main Execution Block (Rewritten for Generic Bloom Filter Test) ---
+# --- Main Driver Block ---
 def main() -> None:
     """Main function to test the generic Bloom Filter."""
     parser = argparse.ArgumentParser(description="Test a generic Bloom Filter.")
@@ -340,19 +370,13 @@ def main() -> None:
     print(f"Total negative samples: {len(negative_sample)}")
     print(f"  - Negatives for final testing: {len(neg_keys_test)}")
 
-    # --- Define Serializer ---
-    # Since keys are strings from the CSV, we need a str -> bytes serializer
-    str_serializer: Serializer[str] = lambda s: s.encode("utf-8")
-
     # --- Construct Bloom Filter ---
     print("\nConstructing Generic Bloom Filter...")
     print(f"Capacity={len(pos_keys)}, Target Error Rate={ERROR_RATE:.6f}")
     construction_start_time: float = time.time()
     try:
         # Instantiate the generic BloomFilter with the specific KeyType (str)
-        bf = BloomFilter[str](
-            capacity=len(pos_keys), error_rate=ERROR_RATE, serializer=str_serializer
-        )
+        bf = BloomFilter[str](capacity=len(pos_keys), error_rate=ERROR_RATE)
         # Add positive keys
         for key in pos_keys:
             bf.add(key)
@@ -363,6 +387,7 @@ def main() -> None:
 
         traceback.print_exc()
         exit(1)
+
     construction_end_time: float = time.time()
     print(
         f"Bloom Filter construction (adding {len(pos_keys)} items) took {construction_end_time - construction_start_time:.4f} seconds."
@@ -424,6 +449,7 @@ def main() -> None:
         print(f"Theoretical Memory Usage (m): {mem_kib:.2f} KiB ({mem_bits} bits)")
     else:
         print(f"Theoretical Memory Usage (m): {mem_bits} bits")
+    print(f"Total Memory Usage: {sizeof(bf)} bytes")
     print(f"Number of Hash Functions (k): {bf.num_hashes}")
     print(f"Number of Items Added (n): {len(bf)}")
     print(f"Estimated Current FP Rate: {bf.get_current_false_positive_rate():.6f}")
