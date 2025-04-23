@@ -25,20 +25,40 @@ PLBFs combine a learned model (predictor) with multiple Bloom filters to achieve
 
 ## Setup and Installation
 
-1.  **Clone the repository (if you haven't already):**
+1.  **Install Git LFS:** The datasets used in this project are large and managed using Git Large File Storage (LFS). You must install Git LFS *before* cloning the repository.
+    *   **macOS (using Homebrew):**
+        ```bash
+        brew install git-lfs
+        ```
+    *   **Linux (Debian/Ubuntu):**
+        ```bash
+        sudo apt-get update
+        sudo apt-get install git-lfs
+        ```
+    *   **Linux (Fedora/CentOS/RHEL):**
+        ```bash
+        sudo dnf install git-lfs
+        # or sudo yum install git-lfs
+        ```
+    *   **Initialize Git LFS for your user:** After installing, run this command once to set up the necessary Git hooks globally:
+        ```bash
+        git lfs install --system
+        ```
+
+2.  **Clone the repository (if you haven't already):**
     ```bash
     git clone git@github.com:MKJM2/cs2241-latency.git
     cd cs2241-latency
     ```
 
-2.  **Create and activate a Python virtual environment:**
+3.  **Create and activate a Python virtual environment:**
     ```bash
     python3 -m venv .venv
     source .venv/bin/activate
     # On Windows use: .venv\Scripts\activate
     ```
 
-3.  **Install dependencies:**
+4.  **Install dependencies:**
     ```bash
     pip install -r requirements.txt
     ```
@@ -111,6 +131,8 @@ https://www.kaggle.com/datasets/sid321axn/malicious-urls-dataset [Online; access
 
 ```
 ./
+├── data/                   # Directory for datasets (managed by Git LFS)
+│   └── malicious_phish.csv # Example dataset
 ├── bloom_filter.py       # Efficient Bloom Filter implementation (used by PLBF)
 ├── requirements.txt      # Python package dependencies
 ├── README.md             # This file
