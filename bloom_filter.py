@@ -197,6 +197,10 @@ class BloomFilter(Generic[KeyType]):
         """Returns the size of the underlying bit array (m)."""
         return self.size
 
+    def __sizeof__(self) -> int:
+        """Returns the size of the underlying bit array in bytes"""
+        return math.ceil(self.bit_size / 8)
+
     def get_current_false_positive_rate(self) -> float:
         """
         Estimates the current theoretical false positive rate based on the

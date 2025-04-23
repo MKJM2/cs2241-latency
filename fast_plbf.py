@@ -1008,7 +1008,7 @@ class PLBF(Generic[KeyType]):
                     print(f"{print_prefix} Error calculating size of thresholds: {e}")
 
         # 2. Size of the backup Bloom filters list (self.bfs)
-        if hasattr(self, "bfs") and self.bfs:
+        if hasattr(self, "bfs") and self.bfs is not None:
             try:
                 # Calculate size of the list object itself + deep size of each filter inside
                 bfs_list_bytes: int = sizeof(
@@ -1025,8 +1025,8 @@ class PLBF(Generic[KeyType]):
                         try:
                             # Use deep_sizeof for the BloomFilter object
                             # This assumes deep_sizeof can handle the BloomFilter's internal structure (e.g., bitarray)
-                            filter_bytes: int = deep_sizeof(
-                                bf, with_overhead=with_overhead, verbose=verbose
+                            filter_bytes: int = sizeof(
+                                bf, with_overhead=with_overhead
                             )
                             if verbose and print_prefix:
                                 print(
@@ -1210,8 +1210,8 @@ def main() -> None:
         action="store",
         dest="hash_features",
         type=int,
-        default=2**16,  # Default number of features for HashingVectorizer
-        help="Number of features for HashingVectorizer (default: 65536)",
+        default=2**12,  # Default number of features for HashingVectorizer
+        help="Number of features for HashingVectorizer (default: 4096)",
     )
 
     results: argparse.Namespace = parser.parse_args()
@@ -1470,7 +1470,12 @@ def main() -> None:
         print(f"Memory Usage of Backup BFs: {mem_bits:.1f} bits")
 
     print(
-        f"Total Memory Usage of PLBF (Backup BFs + Predictor): {plbf_instance.get_actual_size_bytes(verbose=True)} bytes? TODO: This is inaccurate"
+        f"Total Memory Usage of PLBF (Backup BFs + Predictor): {plbf_instance.get_actual_size_bytes(verbose=True)} bytes? " \
+        "TODO: This is inaccurate and does not include the predictor for now..."
+    )
+
+    print(
+        f"Estimated Memory Usage of Predictor: {deep_sizeof(predictor_model)} bytes?"
     )
 
     print("\nOptimal Thresholds (t):")

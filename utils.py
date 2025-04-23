@@ -76,8 +76,8 @@ def deep_sizeof(obj, with_overhead=False, verbose=False):
     else:
         qualname = fqn(obj)
         # Restrict the circle of competence to Scikit-Learn classes
-        if not (qualname.startswith("_abc.") or qualname.startswith("sklearn.")):
-            raise TypeError("The object (class {0}) is not supported ".format(qualname))
+        # if not (qualname.startswith("_abc.") or qualname.startswith("sklearn.")):
+            # raise TypeError("The object (class {0}) is not supported ".format(qualname))
         sum = sizeof(object(), with_overhead=with_overhead)  # Empty object
         names = get_instance_attrs(obj)
         if names:
