@@ -3,6 +3,7 @@ import logging
 import statistics
 import argparse
 import sys  # For deep_sizeof approximation
+import matplotlib.pyplot as plt
 from typing import (
     Any,
     Dict,
@@ -78,6 +79,11 @@ class TimingResult:
     batch_size: int
     repetition: int
     total_latency_ns: float
+    # --- PLBF-specific timings ---
+    predictor_data_movement_time: Optional[float] = None  # seconds
+    predictor_inference_time: Optional[float] = None      # seconds
+    backup_bf_time: Optional[float] = None                # seconds
+    backup_bf_times_batch: Optional[List[float]] = None   # seconds per key
     # Add other per-repetition metrics if needed
 
 
@@ -96,6 +102,15 @@ class ExperimentResult:
     # Optional metrics calculated by the runner
     measured_fpr: Optional[float] = None
     memory_usage_bytes: Optional[float] = None  # Example
+    # --- PLBF-specific aggregated timings ---
+    avg_predictor_data_movement_time: Optional[float] = None
+    std_predictor_data_movement_time: Optional[float] = None
+    avg_predictor_inference_time: Optional[float] = None
+    std_predictor_inference_time: Optional[float] = None
+    avg_backup_bf_time: Optional[float] = None
+    std_backup_bf_time: Optional[float] = None
+    avg_backup_bf_time_per_key: Optional[float] = None
+    std_backup_bf_time_per_key: Optional[float] = None
 
     def __post_init__(self):
         # Avoid division by zero if batch_size is somehow 0
@@ -235,6 +250,8 @@ class ExperimentRunner:
         total_queries = 0
         start_time_exp = time.time()
 
+        is_plbf = hasattr(self.test_subject, "last_predictor_timings") and hasattr(self.test_subject, "last_backup_bf_time")
+
         for batch_size in self.config.batch_sizes:
             logging.info(f"--- Measuring Batch Size: {batch_size} ---")
             batch = self._prepare_test_batch(batch_size)
@@ -253,11 +270,27 @@ class ExperimentRunner:
                         _ = self.query_method(batch)  # Result ignored for timing
 
                     total_latency_ns = timer.get_elapsed_ns()
+                    predictor_data_movement_time = None
+                    predictor_inference_time = None
+                    backup_bf_time = None
+                    backup_bf_times_batch = None
+                    if is_plbf:
+                        timings = getattr(self.test_subject, "last_predictor_timings", None)
+                        if timings:
+                            predictor_data_movement_time = timings.get("data_movement_time")
+                            predictor_inference_time = timings.get("inference_time")
+                        backup_bf_time = getattr(self.test_subject, "last_backup_bf_time", None)
+                        backup_bf_times_batch = getattr(self.test_subject, "last_backup_bf_times_batch", None)
+
                     current_batch_timings.append(
                         TimingResult(
                             batch_size=batch_size,
                             repetition=rep + 1,
                             total_latency_ns=total_latency_ns,
+                            predictor_data_movement_time=predictor_data_movement_time,
+                            predictor_inference_time=predictor_inference_time,
+                            backup_bf_time=backup_bf_time,
+                            backup_bf_times_batch=backup_bf_times_batch,
                         )
                     )
                     total_queries += batch_size
@@ -280,7 +313,6 @@ class ExperimentRunner:
                 logging.info(
                     f"Batch Size {batch_size} complete. Avg total latency: {avg_lat / NS_PER_S:.6f} s"
                 )
-
         end_time_exp = time.time()
         logging.info(
             f"Measurement phase finished in {end_time_exp - start_time_exp:.2f} seconds. Total queries timed: {total_queries}"
@@ -344,8 +376,12 @@ class ExperimentRunner:
                 continue
 
             total_latencies = [r.total_latency_ns for r in timings]
-            if not total_latencies:
-                continue
+            # --- Aggregate PLBF timings ---
+            predictor_data_movement_times = [r.predictor_data_movement_time for r in timings if r.predictor_data_movement_time is not None]
+            predictor_inference_times = [r.predictor_inference_time for r in timings if r.predictor_inference_time is not None]
+            backup_bf_times = [r.backup_bf_time for r in timings if r.backup_bf_time is not None]
+            # For per-key backup BF times, flatten all per-rep lists
+            backup_bf_times_per_key = [t for r in timings if r.backup_bf_times_batch for t in r.backup_bf_times_batch]
 
             agg = ExperimentResult(
                 config_name=self.config.experiment_name,
@@ -362,11 +398,34 @@ class ExperimentRunner:
                 p95_total_latency_ns=float(np.percentile(total_latencies, 95))
                 if total_latencies
                 else 0.0,
-                # Add optional metrics calculated once per experiment run
-                measured_fpr=measured_fpr,
-                memory_usage_bytes=memory_bytes,
+                measured_fpr=measured_fpr, 
+                memory_usage_bytes=memory_bytes, 
+                avg_predictor_data_movement_time=(statistics.mean(predictor_data_movement_times) if predictor_data_movement_times else None),
+                std_predictor_data_movement_time=(statistics.stdev(predictor_data_movement_times) if len(predictor_data_movement_times) > 1 else None),
+                avg_predictor_inference_time=(statistics.mean(predictor_inference_times) if predictor_inference_times else None),
+                std_predictor_inference_time=(statistics.stdev(predictor_inference_times) if len(predictor_inference_times) > 1 else None),
+                avg_backup_bf_time=(statistics.mean(backup_bf_times) if backup_bf_times else None),
+                std_backup_bf_time=(statistics.stdev(backup_bf_times) if len(backup_bf_times) > 1 else None),
+                avg_backup_bf_time_per_key=(statistics.mean(backup_bf_times_per_key) if backup_bf_times_per_key else None),
+                std_backup_bf_time_per_key=(statistics.stdev(backup_bf_times_per_key) if len(backup_bf_times_per_key) > 1 else None),
             )
             aggregated_results.append(agg)
+            # --- Print only the averages for PLBF timings ---
+            if is_plbf:
+                print(f"[PLBF Timing] Batch size: {batch_size}")
+                def fmt(val):
+                    return f"{val * 1000:.2f}" if val is not None else "N/A"
+                def fmt_pm(avg, std):
+                    if avg is not None and std is not None:
+                        return f"{avg * 1000:.2f}+/-{std * 1000:.2f} ms"
+                    elif avg is not None:
+                        return f"{avg * 1000:.2f} ms"
+                    else:
+                        return "N/A"
+                print(f"  Avg predictor data movement time: {fmt_pm(agg.avg_predictor_data_movement_time, agg.std_predictor_data_movement_time)}")
+                print(f"  Avg predictor inference time: {fmt_pm(agg.avg_predictor_inference_time, agg.std_predictor_inference_time)}")
+                print(f"  Avg backup BF total time: {fmt_pm(agg.avg_backup_bf_time, agg.std_backup_bf_time)}")
+                print(f"  Avg backup BF per-key time: {fmt_pm(agg.avg_backup_bf_time_per_key, agg.std_backup_bf_time_per_key)}")
 
         return aggregated_results
 
@@ -418,8 +477,64 @@ def deep_sizeof(o, handlers={}, verbose=False):
     return sizeof(o)
 
 
-# --- Main Execution Block ---
+def plot_stacked_timings(
+    experiment_results: list,
+    experiment_name: str,
+    save_path: str = None,
+) -> None:
+    """
+    Plots a stacked line plot of timing breakdowns for each batch size.
+    Args:
+        experiment_results: List[ExperimentResult]
+        experiment_name: Title for the plot
+        save_path: If provided, saves the plot to this path
+    """
+    batch_sizes = [res.batch_size for res in experiment_results]
+    # Convert all to ms for y-axis
+    pred_data_move = [
+        (res.avg_predictor_data_movement_time or 0) * 1000 for res in experiment_results
+    ]
+    pred_infer = [
+        (res.avg_predictor_inference_time or 0) * 1000 for res in experiment_results
+    ]
+    backup_bf = [
+        (res.avg_backup_bf_time or 0) * 1000 for res in experiment_results
+    ]
+    # Compute the remainder (other) if total latency is higher
+    total = [res.avg_total_latency_ns / 1e6 for res in experiment_results]  # ns to ms
+    # The sum of known components
+    known_sum = [a + b + c for a, b, c in zip(pred_data_move, pred_infer, backup_bf)]
+    other = [max(t - k, 0) for t, k in zip(total, known_sum)]
+    colors = ["#3498db", "#e74c3c", "#f1c40f", "#2ecc71"]  # blue, yellow, red, green
 
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.stackplot(
+        batch_sizes,
+        pred_data_move,
+        pred_infer,
+        backup_bf,
+        other,
+        colors=colors,
+        labels=[
+            "Predictor Data Movement",
+            "Predictor Inference",
+            "Backup BF Query",
+            "Other/Overhead",
+        ],
+        alpha=0.8,
+    )
+    ax.set_xlabel("Batch Size")
+    ax.set_ylabel("Time (ms)")
+    ax.set_title(experiment_name)
+    ax.legend(loc="upper left")
+    ax.grid(True, linestyle=":", alpha=0.6)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path)
+    plt.show()
+
+
+# --- Main Execution Block ---
 
 def main() -> None:
     """Main function to parse arguments, load data, build the specified structure, and run experiments."""
@@ -510,7 +625,6 @@ def main() -> None:
         type=float,
         help="Threshold for Learned Bloom Filter (Required for LBF)",
     )
-
     results: argparse.Namespace = parser.parse_args()
 
     # --- Argument Validation based on Structure Type ---
@@ -867,15 +981,20 @@ def main() -> None:
             print("  Memory Usage: Not reported or zero")
 
         # Optional: Save results
-        # ... (saving logic as before, maybe include structure type) ...
-        # results_df['structure'] = stype
-        # results_df.to_csv(f"{experiment_name}_results.csv", index=False)
+        all_results_df = pd.DataFrame(all_results)
+        all_results_df.to_csv(f"{experiment_name}_results.csv", index=False)
 
     else:
         print("No results were collected from the experiment run.")
+    
+    # 3. Plot the results 
+    plot_stacked_timings(all_results, experiment_name, save_path=f"{experiment_name}_stacked_timings.png")
 
     print("------------------------------------")
 
 
 if __name__ == "__main__":
     main()
+    # After main, optionally plot if results are available
+    # Example usage (insert after results are collected):
+    # plot_stacked_timings(aggregated_results, experiment_name)
