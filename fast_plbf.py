@@ -744,18 +744,55 @@ class PLBF(Generic[KeyType]):
         self._last_backup_bf_time: Optional[float] = None
         self._last_backup_bf_times_batch: Optional[List[float]] = None
 
-        # --- Step 1: Compute Scores using Predictor ---
-        # Compute scores only once for efficiency
-        print("Computing scores using predictor...")
+        # --- Step 1: Compute Scores using Predictor (Batched) ---
+        score_batch_size: int = 1024  # Batch size for scoring
+        print(f"Computing scores using predictor (batch size: {score_batch_size})...")
         start_score_time = time.time()
-        pos_scores, pos_timings = predictor(
-            pos_keys
-        )  # Batch processing all pos_keys for faster PLBF creation
-        neg_scores, neg_timings = predictor(
-            neg_keys
-        )  # Otherwise, one would have to do: [predictor(key) for key in neg_keys]
+
+        all_pos_scores: List[float] = []
+        total_pos_data_move_time: float = 0.0
+        total_pos_inference_time: float = 0.0
+
+        # Batch process positive keys
+        num_pos_batches = math.ceil(len(pos_keys) / score_batch_size)
+        for i in range(num_pos_batches):
+            start_idx = i * score_batch_size
+            end_idx = min((i + 1) * score_batch_size, len(pos_keys))
+            batch_keys = pos_keys[start_idx:end_idx]
+            if not batch_keys: continue # Skip empty batches
+
+            batch_scores, batch_timings = predictor(batch_keys)
+            all_pos_scores.extend(batch_scores)
+            if batch_timings:
+                total_pos_data_move_time += batch_timings.get("data_movement_time", 0.0) or 0.0
+                total_pos_inference_time += batch_timings.get("inference_time", 0.0)
+
+        all_neg_scores: List[float] = []
+        total_neg_data_move_time: float = 0.0
+        total_neg_inference_time: float = 0.0
+
+        # Batch process negative keys
+        num_neg_batches = math.ceil(len(neg_keys) / score_batch_size)
+        for i in range(num_neg_batches):
+            start_idx = i * score_batch_size
+            end_idx = min((i + 1) * score_batch_size, len(neg_keys))
+            batch_keys = neg_keys[start_idx:end_idx]
+            if not batch_keys: continue # Skip empty batches
+
+            batch_scores, batch_timings = predictor(batch_keys)
+            all_neg_scores.extend(batch_scores)
+            if batch_timings:
+                total_neg_data_move_time += batch_timings.get("data_movement_time", 0.0) or 0.0
+                total_neg_inference_time += batch_timings.get("inference_time", 0.0)
+
+        # Assign the collected scores
+        pos_scores = all_pos_scores
+        neg_scores = all_neg_scores
+
         end_score_time = time.time()
         print(f"Score computation took {end_score_time - start_score_time:.2f}s")
+        print(f"  Pos keys: Data move={total_pos_data_move_time:.2f}s, Inference={total_pos_inference_time:.2f}s")
+        print(f"  Neg keys: Data move={total_neg_data_move_time:.2f}s, Inference={total_neg_inference_time:.2f}s")
 
         # --- Step 2: Divide scores into segments & build prLists ---
         print("Building segment distributions (prList)...")

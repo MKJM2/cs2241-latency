@@ -18,6 +18,7 @@ from typing import (
 from dataclasses import dataclass, field
 
 import torch
+from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -499,17 +500,33 @@ def make_pytorch_mlp_predictor(X_train, y_train, device_hint: str = 'cpu') -> Pr
     model = MLP(n_features=4096).to(device)
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    X_tensor = torch.tensor(X_np, dtype=torch.float32, device=device)
-    y_tensor = torch.tensor(y_np, dtype=torch.float32, device=device).view(-1, 1)
-    print(f"[Model 1] Training PyTorch MLP on device: {device}")
+    # All data starts off at the CPU, since we intend to measure the data movement cost
+    # to the GPU!
+    X_tensor = torch.tensor(X_np, dtype=torch.float32, device='cpu')
+    y_tensor = torch.tensor(y_np, dtype=torch.float32, device='cpu').view(-1, 1)
+
+    # We use a DataLoader for mini-batching 
+    # (my poor GTX1050 can't handle the full dataset at once since it has <4GB VRAM)
+    batch_size = 1024
+    dataset = TensorDataset(X_tensor, y_tensor)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    epochs: int = 10  # keep epochs low for dem o
+    print(f"[Model 1] Training PyTorch MLP on device {device} for {epochs} epochs.")
     start_pred_train_time = time.time()
-    for epoch in range(5):  # keep epochs low for demo
+    for epoch in range(epochs):
         model.train()
-        optimizer.zero_grad()
-        outputs = model(X_tensor)
-        loss = criterion(outputs, y_tensor)
-        loss.backward()
-        optimizer.step()
+        epoch_loss = 0.0
+        for batch_X, batch_y in dataloader:
+            batch_X = batch_X.to(device)
+            batch_y = batch_y.to(device)
+            optimizer.zero_grad()
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+        print(f"Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss / len(dataloader):.4f}")
     end_pred_train_time = time.time()
     print(f"[Model 1] PyTorch MLP training took {end_pred_train_time - start_pred_train_time:.2f}s")
     def predictor(keys: Iterable[str]) -> Tuple[List[float], PredictorTimings]:
@@ -517,8 +534,14 @@ def make_pytorch_mlp_predictor(X_train, y_train, device_hint: str = 'cpu') -> Pr
         timings: PredictorTimings = {"data_movement_time": None, "inference_time": 0.0}
         if not keys_list:
             return [], timings
-        X_np = simple_hash_vec(keys_list)
-        X_tensor_cpu = torch.tensor(X_np, dtype=torch.float32, device="cpu")
+
+        # In the sklearn predictor equivalent, the feature engineering (hashvectorizer)
+        # is counted into the 'inference' time, since we measure the inference of the entire
+        # pipeline. We need to count it in here as well, for fairness sake
+        with CpuTimer() as feature_timer:
+            X_np = simple_hash_vec(keys_list)
+            X_tensor_cpu = torch.tensor(X_np, dtype=torch.float32, device="cpu")
+        timings["inference_time"] = feature_timer.get_elapsed_ns() / NS_PER_S
         if device.type == "cuda":
             # Benchmark data movement to GPU
             with CudaTimer(device=device) as data_timer:
@@ -528,18 +551,16 @@ def make_pytorch_mlp_predictor(X_train, y_train, device_hint: str = 'cpu') -> Pr
                 with torch.no_grad():
                     logits = model(X_tensor)
                     probs = torch.sigmoid(logits)
-            timings["inference_time"] = inf_timer.get_elapsed_ns() / NS_PER_S
+            timings["inference_time"] += inf_timer.get_elapsed_ns() / NS_PER_S
             with CudaTimer(device=device) as data_back_timer:
-                probs = probs.cpu()
+                probs = probs.cpu().numpy().flatten()
             timings["data_movement_time"] += data_back_timer.get_elapsed_ns() / NS_PER_S
-            # The below should be capture by the "Other/Overhead" category in the graphs
-            probs = probs.numpy().flatten()
         else:
             with CpuTimer() as inf_timer:
                 with torch.no_grad():
                     logits = model(X_tensor_cpu)
                     probs = torch.sigmoid(logits).cpu()
-            timings["inference_time"] = inf_timer.get_elapsed_ns() / NS_PER_S
+            timings["inference_time"] += inf_timer.get_elapsed_ns() / NS_PER_S
             # The below should be capture by the "Other/Overhead" category in the graphs
             probs = probs.numpy().flatten()
         return probs.tolist(), timings
@@ -1097,13 +1118,13 @@ def main() -> None:
 
         # Optional: Save results
         all_results_df = pd.DataFrame(all_results)
-        all_results_df.to_csv(f"{experiment_name}_{results.model}_{results.device}_results.csv", index=False)
+        all_results_df.to_csv(f"results/{experiment_name}_{results.model}_{results.device}_results.csv", index=False)
 
     else:
         print("No results were collected from the experiment run.")
     
     # 3. Plot the results 
-    plot_stacked_timings(all_results, experiment_name, save_path=f"{experiment_name}_{results.model}_{results.device}_stacked_timings.png")
+    plot_stacked_timings(all_results, experiment_name, save_path=f"results/{experiment_name}_{results.model}_{results.device}_stacked_timings.png")
 
     print("------------------------------------")
 
