@@ -18,6 +18,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from utils import sizeof
+from timers import CpuTimer
 
 # --- Type variables and aliases ---
 KeyType = TypeVar("KeyType")
@@ -57,6 +58,7 @@ class BloomFilter(Generic[KeyType]):
         "num_items",
         "_hasher1_intdigest",
         "_hasher2_intdigest",
+        "_last_contains_time_ns",
     )
 
     # Type alias for the internal hash function signature (bytes -> int)
@@ -123,9 +125,9 @@ class BloomFilter(Generic[KeyType]):
             return bytes(item)  # no-op
         if isinstance(item, str):
             return item.encode("utf-8")
-        if isinstance(item, float): # float: 8-byte IEEE-754 big-endian
+        if isinstance(item, float):  # float: 8-byte IEEE-754 big-endian
             return struct.pack(">d", item)
-        if isinstance(item, int): # int: two's-complement 64-bit little-endian
+        if isinstance(item, int):  # int: two's-complement 64-bit little-endian
             return item.to_bytes(8, byteorder="little", signed=True)
         raise TypeError(
             f"No default serializer for type {type(item).__name__}; "
@@ -193,7 +195,8 @@ class BloomFilter(Generic[KeyType]):
 
     def __contains__(self, item: KeyType) -> bool:
         """
-        Checks if an item might be in the Bloom filter.
+        Checks if an item might be in the Bloom filter. In addition, measures
+        the execution time in ns and stores it in the `last_contains_time_ns` property.
 
         The item is first converted to bytes using the serializer provided
         during initialization.
@@ -205,16 +208,19 @@ class BloomFilter(Generic[KeyType]):
             True if the item is possibly in the set (may be a false positive).
             False if the item is definitely not in the set.
         """
-        try:
-            item_bytes: bytes = self.serializer(item)
-        except Exception as e:
-            # If serialization fails, the item cannot have been added
-            raise TypeError(
-                f"Warning: Failed to serialize item for checking. Returning False. Error: {e}"
-            ) from e
+        with CpuTimer() as timer:
+            try:
+                item_bytes: bytes = self.serializer(item)
+            except Exception as e:
+                # If serialization fails, the item cannot have been added
+                raise TypeError(
+                    f"Warning: Failed to serialize item for checking. Returning False. Error: {e}"
+                ) from e
 
-        indices: List[int] = self._get_indices(item_bytes)
-        return self._check_indices(indices)
+            indices: List[int] = self._get_indices(item_bytes)
+            result = self._check_indices(indices)
+        self._last_contains_time_ns = timer.get_elapsed_ns()
+        return result
 
     # --- Other Public Methods ---
 
@@ -257,6 +263,17 @@ class BloomFilter(Generic[KeyType]):
 
         return max(0.0, min(1.0, rate))  # Clamp result
 
+    @property
+    def last_contains_time_ns(self) -> Optional[float]:
+        """
+        Returns the nanosecond timing of the last `__contains__` operation.
+
+        Returns:
+            The elapsed time in nanoseconds as an int for the last membership
+            check, or None if no check has been performed yet.
+        """
+        return self._last_contains_time_ns
+
     def __repr__(self) -> str:
         """Returns a developer-friendly representation of the filter."""
         # Determine serializer name if possible, otherwise show type
@@ -270,7 +287,10 @@ class BloomFilter(Generic[KeyType]):
             f"serializer={serializer_name}, "
             f"size={self.size}, "
             f"num_hashes={self.num_hashes}, "
-            f"num_items={self.num_items})"
+            f"num_items={self.num_items}, "
+            f"last_contains_time_ns={self._last_contains_time_ns:.2f})"
+            if self._last_contains_time_ns is not None
+            else "last_contains_time_ns=None)"
         )
 
 

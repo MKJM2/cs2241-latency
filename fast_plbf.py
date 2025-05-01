@@ -1,7 +1,6 @@
 import argparse
 import math
 import time
-import sys
 import bisect
 from typing import (
     Any,
@@ -1022,9 +1021,7 @@ class PLBF(Generic[KeyType]):
                         try:
                             # Use deep_sizeof for the BloomFilter object
                             # This assumes deep_sizeof can handle the BloomFilter's internal structure (e.g., bitarray)
-                            filter_bytes: int = sizeof(
-                                bf, with_overhead=with_overhead
-                            )
+                            filter_bytes: int = sizeof(bf, with_overhead=with_overhead)
                             if verbose and print_prefix:
                                 print(
                                     f"{print_prefix}  - Filter bfs[{i}]: {filter_bytes} bytes"
@@ -1466,13 +1463,11 @@ def main() -> None:
         print(f"Memory Usage of Backup BFs: {mem_bits:.1f} bits")
 
     print(
-        f"Total Memory Usage of PLBF (Backup BFs + Predictor): {plbf_instance.get_actual_size_bytes(verbose=True)} bytes? " \
+        f"Total Memory Usage of PLBF (Backup BFs + Predictor): {plbf_instance.get_actual_size_bytes(verbose=True)} bytes? "
         "TODO: This is inaccurate and does not include the predictor for now..."
     )
 
-    print(
-        f"Estimated Memory Usage of Predictor: {deep_sizeof(predictor_model)} bytes?"
-    )
+    print(f"Estimated Memory Usage of Predictor: {deep_sizeof(predictor_model)} bytes?")
 
     print("\nOptimal Thresholds (t):")
     # Check if thresholds exist before printing
