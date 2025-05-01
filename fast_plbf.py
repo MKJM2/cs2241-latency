@@ -13,6 +13,8 @@ from typing import (
     TypeVar,
     Sequence,
     Iterable,
+    TypedDict,
+    Dict,
 )
 import pandas as pd
 import numpy as np
@@ -28,8 +30,13 @@ from utils import deep_sizeof, sizeof
 
 # Type variables and aliases
 KeyType = TypeVar("KeyType")
+# Timings TypedDict for predictor
+class PredictorTimings(TypedDict, total=False):
+    data_movement_time: Optional[float]  # seconds, None if CPU
+    inference_time: float  # seconds
+
 # Define a specific type for the predictor function
-Predictor = Callable[[Iterable[KeyType]], List[float]]
+Predictor = Callable[[Iterable[KeyType]], Tuple[List[float], PredictorTimings]]
 
 # Constants
 EPS: Final[float] = 1e-8
@@ -732,14 +739,19 @@ class PLBF(Generic[KeyType]):
         self.k: Final[int] = k
         self.n: Final[int] = len(pos_keys)  # Total number of positive keys
 
+        # --- Timing Properties ---
+        self._last_predictor_timings: Optional[PredictorTimings] = None
+        self._last_backup_bf_time: Optional[float] = None
+        self._last_backup_bf_times_batch: Optional[List[float]] = None
+
         # --- Step 1: Compute Scores using Predictor ---
         # Compute scores only once for efficiency
         print("Computing scores using predictor...")
         start_score_time = time.time()
-        pos_scores: List[float] = predictor(
+        pos_scores, pos_timings = predictor(
             pos_keys
         )  # Batch processing all pos_keys for faster PLBF creation
-        neg_scores: List[float] = predictor(
+        neg_scores, neg_timings = predictor(
             neg_keys
         )  # Otherwise, one would have to do: [predictor(key) for key in neg_keys]
         end_score_time = time.time()
@@ -770,6 +782,21 @@ class PLBF(Generic[KeyType]):
         self._build_filters(pos_keys, pos_scores)
         end_build_time = time.time()
         print(f"Filter construction took {end_build_time - start_build_time:.2f}s")
+
+    @property
+    def last_predictor_timings(self) -> Optional[PredictorTimings]:
+        """Returns the timings from the last predictor call (contains or contains_batch)."""
+        return self._last_predictor_timings
+
+    @property
+    def last_backup_bf_time(self) -> Optional[float]:
+        """Returns the total backup Bloom filter query time (seconds) from the last contains/contains_batch call."""
+        return self._last_backup_bf_time
+
+    @property
+    def last_backup_bf_times_batch(self) -> Optional[List[float]]:
+        """Returns the per-key backup Bloom filter query times from the last contains_batch call."""
+        return self._last_backup_bf_times_batch
 
     def _find_best_t_and_f(self) -> None:
         """Finds the best region thresholds (t) and FPRs (f) using standard DP."""
@@ -898,20 +925,23 @@ class PLBF(Generic[KeyType]):
                   False if the key is definitely not present (true negative).
         """
         assert hasattr(self, "bfs"), "Filters not initialized."
-        score: float = self._predictor([key])[0]
+        scores, timings = self._predictor([key])
+        self._last_predictor_timings = timings
+        score: float = scores[0]
         assert 0.0 <= score <= 1.0, f"Predictor score out of bounds: {score}"
 
         region_idx: int = self._get_region_idx(score)
         fpr_i: Optional[float] = self.f[region_idx]
         bf: Optional[BloomFilter[KeyType]] = self.bfs[region_idx]
-
+        # Time the backup BF query
+        start_bf = time.perf_counter()
         if fpr_i is None:
             # Should not happen if initialization succeeded. Assume positive?
             print(f"Warning: FPR f[{region_idx}] is None during contains().")
             return True  # Fail safe?
         elif fpr_i >= 1.0 - EPS:
             # Region has FPR=1. Always return True.
-            return True
+            result = True
         elif fpr_i <= EPS:
             # Region has FPR=0. Should only contain positive keys.
             # If a BF exists (e.g., placeholder for testing), query it.
@@ -921,11 +951,15 @@ class PLBF(Generic[KeyType]):
             # This assumes f=0 only occurs when neg_pr=0 for the region.
             # A more robust f=0 handling might involve storing keys if needed.
             # Let's return False if no BF exists for f=0 region.
-            return bf is not None and (key in bf)
+            result = bf is not None and (key in bf)
         else:
             # Standard case: Query the Bloom filter for the region.
             # If bf is None (e.g., creation failed or count was 0), key cannot be present.
-            return bf is not None and (key in bf)
+            result = bf is not None and key in bf
+        end_bf = time.perf_counter()
+        self._last_backup_bf_time = end_bf - start_bf
+        self._last_backup_bf_times_batch = None
+        return result
 
     def contains_batch(self, keys: Iterable[KeyType]) -> List[bool]:
         """
@@ -942,15 +976,16 @@ class PLBF(Generic[KeyType]):
         assert hasattr(self, "bfs"), "Filters not initialized."
 
         key_list: List[KeyType] = list(keys)
-        scores: List[float] = self._predictor(key_list)
+        scores, timings = self._predictor(key_list)
+        self._last_predictor_timings = timings
         results: List[bool] = [False] * len(key_list)  # Preallocate result size
-
+        bf_times: List[float] = []
         for key, score in zip(key_list, scores):
             assert 0.0 <= score <= 1.0, f"Predictor score out of bounds: {score}"
             region_idx: int = self._get_region_idx(score)
             fpr_i: Optional[float] = self.f[region_idx]
             bf: Optional[BloomFilter[KeyType]] = self.bfs[region_idx]
-
+            start_bf = time.perf_counter()
             if fpr_i is None:
                 # Invalid config, fail-safe to True
                 results.append(True)
@@ -961,7 +996,11 @@ class PLBF(Generic[KeyType]):
                 results.append(bf is not None and key in bf)
             else:
                 results.append(bf is not None and key in bf)
+            end_bf = time.perf_counter()
+            bf_times.append(end_bf - start_bf)
 
+        self._last_backup_bf_time = sum(bf_times)
+        self._last_backup_bf_times_batch = bf_times
         return results
 
     def get_actual_size_bytes(
@@ -1343,27 +1382,28 @@ def main() -> None:
     # --- Define the Predictor Function for PLBF ---
 
     # To speed up the setup of PLBF, we use batching by default:
-    def trained_predictor(keys: Iterable[str]) -> List[float]:
+    def trained_predictor(keys: Iterable[str]) -> Tuple[List[float], PredictorTimings]:
         """
         Batched predictor function.
-        Takes an iterable of keys, returns a list of scores [0,1] per key.
+        Takes an iterable of keys, returns a list of scores [0,1] per key, and timings.
         Caches individual predictions.
         """
         keys_list = list(map(str, keys))  # Ensure string format
         results = [0.0] * len(keys_list)  # Pre-allocate output
+        timings: PredictorTimings = {"data_movement_time": None, "inference_time": 0.0}
 
         try:
             if keys_list:
-                probas: np.ndarray[Any, np.dtype[np.float64]] = (
-                    predictor_model.predict_proba(keys_list)
-                )
+                start_inf = time.perf_counter()
+                probas = predictor_model.predict_proba(keys_list)
+                timings["inference_time"] = time.perf_counter() - start_inf
                 results = probas[:, 1].astype(float).tolist()
         except NotFittedError:
             raise RuntimeError("Predictor model not fitted!")
         except Exception as e:
             print(f"Error during prediction: {e}")
 
-        return results
+        return results, timings
 
     # This function encapsulates feature extraction and prediction
     predictor_func: Predictor[str] = trained_predictor

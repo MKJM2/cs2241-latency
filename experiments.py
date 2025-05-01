@@ -10,6 +10,9 @@ from typing import (
     Optional,
     Iterable,
     Final,
+    TypedDict,
+    Tuple,
+    Callable,
 )
 from dataclasses import dataclass, field
 
@@ -368,6 +371,14 @@ class ExperimentRunner:
         return aggregated_results
 
 
+# --- Predictor Timings TypedDict ---
+class PredictorTimings(TypedDict, total=False):
+    data_movement_time: Optional[float]  # seconds, None if CPU
+    inference_time: float  # seconds
+
+# Predictor type alias
+Predictor = Callable[[Iterable[str]], Tuple[List[float], PredictorTimings]]
+
 # --- Helper Functions (from your example, potentially move to utils) ---
 
 
@@ -634,19 +645,21 @@ def main() -> None:
         )
 
         # Define Predictor Function Wrapper (common for LBF/PLBF)
-        def trained_predictor(keys: Iterable[str]) -> List[float]:
+        def trained_predictor(keys: Iterable[str]) -> Tuple[List[float], PredictorTimings]:
             keys_list = list(map(str, keys))
             if not keys_list:
-                return []
+                return [], {"data_movement_time": None, "inference_time": 0.0}
+            timings: PredictorTimings = {"data_movement_time": None, "inference_time": 0.0}
             try:
-                probas: np.ndarray[Any, Any] = predictor_model.predict_proba(keys_list)
-                return probas[:, 1].astype(float).tolist()
+                start_inf = time.perf_counter()
+                probas = predictor_model.predict_proba(keys_list)
+                timings["inference_time"] = time.perf_counter() - start_inf
+                return probas[:, 1].astype(float).tolist(), timings
             except NotFittedError:
                 raise RuntimeError("Predictor model not fitted!")
             except Exception as e:
                 logging.error(f"Error during prediction: {e}", exc_info=True)
-                return [0.0] * len(keys_list)
-
+                return [0.0] * len(keys_list), timings
         predictor_func = trained_predictor
 
     # --- 4. Construct the Test Subject ---
@@ -866,4 +879,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
