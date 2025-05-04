@@ -9,6 +9,7 @@ from typing import (
     Callable,
     Final,
     Generic,
+    Iterable,
     List,
     Tuple,
     TypeVar,
@@ -221,6 +222,40 @@ class BloomFilter(Generic[KeyType]):
             result = self._check_indices(indices)
         self._last_contains_time_ns = timer.get_elapsed_ns()
         return result
+
+    def contains_batch(self, items: Iterable[KeyType]) -> List[bool]:
+        """
+        Checks if multiple items might be in the Bloom filter. In addition,
+        measures the execution time in ns and stores it in the
+        `last_contains_time_ns` property.
+
+        The items are first converted to bytes using the serializer provided
+        during initialization.
+
+        Args:
+            items: An iterable of items of KeyType to check.
+
+        Returns:
+            A list of booleans indicating whether each item is possibly in the set
+            (may be a false positive). False if the item is definitely not in the set.
+        """
+        with CpuTimer() as timer:
+            try:
+                item_bytes_list: List[bytes] = [
+                    self.serializer(item) for item in items
+                ]
+            except Exception as e:
+                # If serialization fails, the items cannot have been added
+                raise TypeError(
+                    f"Warning: Failed to serialize items for checking. Returning False. Error: {e}"
+                ) from e
+
+            indices_list: List[List[int]] = [
+                self._get_indices(item_bytes) for item_bytes in item_bytes_list
+            ]
+            results = [self._check_indices(indices) for indices in indices_list]
+        self._last_contains_time_ns = timer.get_elapsed_ns()
+        return results
 
     # --- Other Public Methods ---
 

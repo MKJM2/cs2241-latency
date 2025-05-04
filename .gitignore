@@ -179,3 +179,9 @@ data/*.zip
 # MacOS Things
 .DS_Store
 */.DS_Store
+
+# Cached models
+_models
+_models/
+_models/*
+_models/*/

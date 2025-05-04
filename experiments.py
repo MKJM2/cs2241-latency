@@ -2,6 +2,7 @@ import time
 import logging
 import statistics
 import argparse
+import os
 import sys  # For deep_sizeof approximation
 import matplotlib.pyplot as plt
 from typing import (
@@ -31,6 +32,14 @@ from sklearn.ensemble import RandomForestClassifier
 from bloom_filter import BloomFilter
 from fast_plbf import FastPLBF
 # TODO: from learned_bloom_filter import LearnedBloomFilter
+
+# Setup fancy plots
+import scienceplots
+
+plt.style.use(["science", "grid", "ieee"])
+
+# Don't plot log plots for now
+plot_log = False
 
 # --- Assume these imports exist from your project ---
 from timers import (
@@ -83,9 +92,9 @@ class TimingResult:
     total_latency_ns: float
     # --- PLBF-specific timings ---
     predictor_data_movement_time: Optional[float] = None  # seconds
-    predictor_inference_time: Optional[float] = None      # seconds
-    backup_bf_time: Optional[float] = None                # seconds
-    backup_bf_times_batch: Optional[List[float]] = None   # seconds per key
+    predictor_inference_time: Optional[float] = None  # seconds
+    backup_bf_time: Optional[float] = None  # seconds
+    backup_bf_times_batch: Optional[List[float]] = None  # seconds per key
     # Add other per-repetition metrics if needed
 
 
@@ -252,7 +261,9 @@ class ExperimentRunner:
         total_queries = 0
         start_time_exp = time.time()
 
-        is_plbf = hasattr(self.test_subject, "last_predictor_timings") and hasattr(self.test_subject, "last_backup_bf_time")
+        is_plbf = hasattr(self.test_subject, "last_predictor_timings") and hasattr(
+            self.test_subject, "last_backup_bf_time"
+        )
 
         for batch_size in self.config.batch_sizes:
             logging.info(f"--- Measuring Batch Size: {batch_size} ---")
@@ -277,12 +288,20 @@ class ExperimentRunner:
                     backup_bf_time = None
                     backup_bf_times_batch = None
                     if is_plbf:
-                        timings = getattr(self.test_subject, "last_predictor_timings", None)
+                        timings = getattr(
+                            self.test_subject, "last_predictor_timings", None
+                        )
                         if timings:
-                            predictor_data_movement_time = timings.get("data_movement_time")
+                            predictor_data_movement_time = timings.get(
+                                "data_movement_time"
+                            )
                             predictor_inference_time = timings.get("inference_time")
-                        backup_bf_time = getattr(self.test_subject, "last_backup_bf_time", None)
-                        backup_bf_times_batch = getattr(self.test_subject, "last_backup_bf_times_batch", None)
+                        backup_bf_time = getattr(
+                            self.test_subject, "last_backup_bf_time", None
+                        )
+                        backup_bf_times_batch = getattr(
+                            self.test_subject, "last_backup_bf_times_batch", None
+                        )
 
                     current_batch_timings.append(
                         TimingResult(
@@ -379,11 +398,26 @@ class ExperimentRunner:
 
             total_latencies = [r.total_latency_ns for r in timings]
             # --- Aggregate PLBF timings ---
-            predictor_data_movement_times = [r.predictor_data_movement_time for r in timings if r.predictor_data_movement_time is not None]
-            predictor_inference_times = [r.predictor_inference_time for r in timings if r.predictor_inference_time is not None]
-            backup_bf_times = [r.backup_bf_time for r in timings if r.backup_bf_time is not None]
+            predictor_data_movement_times = [
+                r.predictor_data_movement_time
+                for r in timings
+                if r.predictor_data_movement_time is not None
+            ]
+            predictor_inference_times = [
+                r.predictor_inference_time
+                for r in timings
+                if r.predictor_inference_time is not None
+            ]
+            backup_bf_times = [
+                r.backup_bf_time for r in timings if r.backup_bf_time is not None
+            ]
             # For per-key backup BF times, flatten all per-rep lists
-            backup_bf_times_per_key = [t for r in timings if r.backup_bf_times_batch for t in r.backup_bf_times_batch]
+            backup_bf_times_per_key = [
+                t
+                for r in timings
+                if r.backup_bf_times_batch
+                for t in r.backup_bf_times_batch
+            ]
 
             agg = ExperimentResult(
                 config_name=self.config.experiment_name,
@@ -400,23 +434,55 @@ class ExperimentRunner:
                 p95_total_latency_ns=float(np.percentile(total_latencies, 95))
                 if total_latencies
                 else 0.0,
-                measured_fpr=measured_fpr, 
-                memory_usage_bytes=memory_bytes, 
-                avg_predictor_data_movement_time=(statistics.mean(predictor_data_movement_times) if predictor_data_movement_times else None),
-                std_predictor_data_movement_time=(statistics.stdev(predictor_data_movement_times) if len(predictor_data_movement_times) > 1 else None),
-                avg_predictor_inference_time=(statistics.mean(predictor_inference_times) if predictor_inference_times else None),
-                std_predictor_inference_time=(statistics.stdev(predictor_inference_times) if len(predictor_inference_times) > 1 else None),
-                avg_backup_bf_time=(statistics.mean(backup_bf_times) if backup_bf_times else None),
-                std_backup_bf_time=(statistics.stdev(backup_bf_times) if len(backup_bf_times) > 1 else None),
-                avg_backup_bf_time_per_key=(statistics.mean(backup_bf_times_per_key) if backup_bf_times_per_key else None),
-                std_backup_bf_time_per_key=(statistics.stdev(backup_bf_times_per_key) if len(backup_bf_times_per_key) > 1 else None),
+                measured_fpr=measured_fpr,
+                memory_usage_bytes=memory_bytes,
+                avg_predictor_data_movement_time=(
+                    statistics.mean(predictor_data_movement_times)
+                    if predictor_data_movement_times
+                    else None
+                ),
+                std_predictor_data_movement_time=(
+                    statistics.stdev(predictor_data_movement_times)
+                    if len(predictor_data_movement_times) > 1
+                    else None
+                ),
+                avg_predictor_inference_time=(
+                    statistics.mean(predictor_inference_times)
+                    if predictor_inference_times
+                    else None
+                ),
+                std_predictor_inference_time=(
+                    statistics.stdev(predictor_inference_times)
+                    if len(predictor_inference_times) > 1
+                    else None
+                ),
+                avg_backup_bf_time=(
+                    statistics.mean(backup_bf_times) if backup_bf_times else None
+                ),
+                std_backup_bf_time=(
+                    statistics.stdev(backup_bf_times)
+                    if len(backup_bf_times) > 1
+                    else None
+                ),
+                avg_backup_bf_time_per_key=(
+                    statistics.mean(backup_bf_times_per_key)
+                    if backup_bf_times_per_key
+                    else None
+                ),
+                std_backup_bf_time_per_key=(
+                    statistics.stdev(backup_bf_times_per_key)
+                    if len(backup_bf_times_per_key) > 1
+                    else None
+                ),
             )
             aggregated_results.append(agg)
             # --- Print only the averages for PLBF timings ---
             if is_plbf:
                 print(f"[PLBF Timing] Batch size: {batch_size}")
+
                 def fmt(val):
                     return f"{val * 1000:.2f}" if val is not None else "N/A"
+
                 def fmt_pm(avg, std):
                     if avg is not None and std is not None:
                         return f"{avg * 1000:.2f}+/-{std * 1000:.2f} ms"
@@ -424,10 +490,19 @@ class ExperimentRunner:
                         return f"{avg * 1000:.2f} ms"
                     else:
                         return "N/A"
-                print(f"  Avg predictor data movement time: {fmt_pm(agg.avg_predictor_data_movement_time, agg.std_predictor_data_movement_time)}")
-                print(f"  Avg predictor inference time: {fmt_pm(agg.avg_predictor_inference_time, agg.std_predictor_inference_time)}")
-                print(f"  Avg backup BF total time: {fmt_pm(agg.avg_backup_bf_time, agg.std_backup_bf_time)}")
-                print(f"  Avg backup BF per-key time: {fmt_pm(agg.avg_backup_bf_time_per_key, agg.std_backup_bf_time_per_key)}")
+
+                print(
+                    f"  Avg predictor data movement time: {fmt_pm(agg.avg_predictor_data_movement_time, agg.std_predictor_data_movement_time)}"
+                )
+                print(
+                    f"  Avg predictor inference time: {fmt_pm(agg.avg_predictor_inference_time, agg.std_predictor_inference_time)}"
+                )
+                print(
+                    f"  Avg backup BF total time: {fmt_pm(agg.avg_backup_bf_time, agg.std_backup_bf_time)}"
+                )
+                print(
+                    f"  Avg backup BF per-key time: {fmt_pm(agg.avg_backup_bf_time_per_key, agg.std_backup_bf_time_per_key)}"
+                )
 
         return aggregated_results
 
@@ -437,6 +512,7 @@ class PredictorTimings(TypedDict, total=False):
     data_movement_time: Optional[float]  # seconds, None if CPU
     inference_time: float  # seconds
 
+
 # Predictor type alias
 Predictor = Callable[[Iterable[str]], Tuple[List[float], PredictorTimings]]
 
@@ -444,97 +520,140 @@ Predictor = Callable[[Iterable[str]], Tuple[List[float], PredictorTimings]]
 # Each function returns a predictor function (matching Predictor type) after training on the provided data.
 # The predictor function will handle timing and device logic as needed.
 
-def make_logistic_regression_predictor(X_train, y_train, device_hint: str = 'cpu') -> Predictor:
+
+def make_logistic_regression_predictor(
+    X_train, y_train, device_hint: str = "cpu"
+) -> Predictor:
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import Pipeline
     from sklearn.feature_extraction.text import HashingVectorizer
     from sklearn.exceptions import NotFittedError
     import time
+
     vectorizer = HashingVectorizer(n_features=4096, alternate_sign=False)
-    model = LogisticRegression(solver="liblinear", random_state=42, class_weight="balanced")
-    pipe = Pipeline([
-        ("vectorizer", vectorizer),
-        ("classifier", model),
-    ])
+    model = LogisticRegression(
+        solver="liblinear", random_state=42, class_weight="balanced"
+    )
+    pipe = Pipeline(
+        [
+            ("vectorizer", vectorizer),
+            ("classifier", model),
+        ]
+    )
     start_pred_train_time = time.time()
     pipe.fit(X_train, y_train)
     end_pred_train_time = time.time()
-    print(f"[Model 0] LogisticRegression training took {end_pred_train_time - start_pred_train_time:.2f}s")
+    print(
+        f"[Model 0] LogisticRegression training took {end_pred_train_time - start_pred_train_time:.2f}s"
+    )
+
     def predictor(keys: Iterable[str]) -> Tuple[List[float], PredictorTimings]:
         keys_list = list(map(str, keys))
         timings: PredictorTimings = {"data_movement_time": None, "inference_time": 0.0}
         if not keys_list:
             return [], timings
         import time
+
         start_inf = time.perf_counter()
         probas = pipe.predict_proba(keys_list)
         timings["inference_time"] = time.perf_counter() - start_inf
         return probas[:, 1].astype(float).tolist(), timings
+
     return predictor
 
 
-def make_pytorch_mlp_predictor(X_train, y_train, device_hint: str = 'cpu') -> Predictor:
+def make_pytorch_mlp_predictor(X_train: Iterable[str], y_train: Iterable[float], device_hint: str = "cpu") -> Predictor:
     import torch.nn as nn
     import torch.optim as optim
+    import hashlib
+
     # Dummy example: one-hot encode input strings by hash, simple MLP
     def simple_hash_vec(keys, n_features=4096):
         arr = np.zeros((len(keys), n_features), dtype=np.float32)
         for i, k in enumerate(keys):
-            idx = hash(k) % n_features
+            # use deterministic hash for stable cache key
+            digest = hashlib.sha256(k.encode()).digest()
+            idx = int.from_bytes(digest, "big") % n_features
             arr[i, idx] = 1.0
         return arr
+
     X_np = simple_hash_vec(X_train)
     y_np = np.array(y_train, dtype=np.float32)
-    device = torch.device("cuda" if device_hint == "cuda" and torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        "cuda" if device_hint == "cuda" and torch.cuda.is_available() else "cpu"
+    )
+
     class MLP(nn.Module):
-        def __init__(self, n_features):
+        def __init__(self, n_features: int):
             super().__init__()
             self.fc1 = nn.Linear(n_features, 64)
             self.relu = nn.ReLU()
             self.fc2 = nn.Linear(64, 1)
-        def forward(self, x):
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
             x = self.fc1(x)
             x = self.relu(x)
             x = self.fc2(x)
             return x
-    model = MLP(n_features=4096).to(device)
+
+    n_features = 4096
+    # --- Caching logic start ---
+    cache_dir = "_models"
+    os.makedirs(cache_dir, exist_ok=True)
+    # Hash the training data and model config for cache key
+    def get_cache_key(X_np: np.ndarray, y_np: np.ndarray, n_features: int) -> str:
+        m = hashlib.sha256()
+        m.update(X_np.tobytes())
+        m.update(y_np.tobytes())
+        m.update(str(n_features).encode())
+        return m.hexdigest()
+    cache_key = get_cache_key(X_np, y_np, n_features)
+    cache_path = os.path.join(cache_dir, f"mlp_{cache_key}.pt")
+    model = MLP(n_features=n_features).to(device)
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    # All data starts off at the CPU, since we intend to measure the data movement cost
-    # to the GPU!
-    X_tensor = torch.tensor(X_np, dtype=torch.float32, device='cpu')
-    y_tensor = torch.tensor(y_np, dtype=torch.float32, device='cpu').view(-1, 1)
+    if os.path.exists(cache_path):
+        print(f"[Model 1] Loading cached PyTorch MLP from {cache_path}")
+        checkpoint = torch.load(cache_path, map_location=device)
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+    else:
+        # All data starts off at the CPU, since we intend to measure the data movement cost
+        # to the GPU!
+        X_tensor = torch.tensor(X_np, dtype=torch.float32, device="cpu")
+        y_tensor = torch.tensor(y_np, dtype=torch.float32, device="cpu").view(-1, 1)
 
-    # We use a DataLoader for mini-batching 
-    # (my poor GTX1050 can't handle the full dataset at once since it has <4GB VRAM)
-    batch_size = 1024
-    dataset = TensorDataset(X_tensor, y_tensor)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        # We use a DataLoader for mini-batching
+        # (my poor GTX1050 can't handle the full dataset at once since it has <4GB VRAM)
+        batch_size = 1024
+        dataset = TensorDataset(X_tensor, y_tensor)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        epochs: int = 10  # keep epochs low for demo
+        print(f"[Model Factory] Training PyTorch MLP on device {device} for {epochs} epochs.")
+        start_pred_train_time = time.time()
+        for epoch in range(epochs):
+            model.train()
+            epoch_loss = 0.0
+            for batch_X, batch_y in dataloader:
+                batch_X = batch_X.to(device)
+                batch_y = batch_y.to(device)
+                optimizer.zero_grad()
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+            print(f"Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss / len(dataloader):.4f}")
+        end_pred_train_time = time.time()
+        print(f"[Model Factory] PyTorch MLP training took {end_pred_train_time - start_pred_train_time:.2f}s")
+        torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict()}, cache_path)
+        print(f"[Model Factory] Saved model to cache: {cache_path}")
 
-    epochs: int = 10  # keep epochs low for dem o
-    print(f"[Model 1] Training PyTorch MLP on device {device} for {epochs} epochs.")
-    start_pred_train_time = time.time()
-    for epoch in range(epochs):
-        model.train()
-        epoch_loss = 0.0
-        for batch_X, batch_y in dataloader:
-            batch_X = batch_X.to(device)
-            batch_y = batch_y.to(device)
-            optimizer.zero_grad()
-            outputs = model(batch_X)
-            loss = criterion(outputs, batch_y)
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-        print(f"Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss / len(dataloader):.4f}")
-    end_pred_train_time = time.time()
-    print(f"[Model 1] PyTorch MLP training took {end_pred_train_time - start_pred_train_time:.2f}s")
     def predictor(keys: Iterable[str]) -> Tuple[List[float], PredictorTimings]:
         keys_list = list(map(str, keys))
         timings: PredictorTimings = {"data_movement_time": None, "inference_time": 0.0}
         if not keys_list:
             return [], timings
-
         # In the sklearn predictor equivalent, the feature engineering (hashvectorizer)
         # is counted into the 'inference' time, since we measure the inference of the entire
         # pipeline. We need to count it in here as well, for fairness sake
@@ -564,7 +683,9 @@ def make_pytorch_mlp_predictor(X_train, y_train, device_hint: str = 'cpu') -> Pr
             # The below should be capture by the "Other/Overhead" category in the graphs
             probs = probs.numpy().flatten()
         return probs.tolist(), timings
+
     return predictor
+
 
 # List of model factories
 PREDICTOR_MODEL_FACTORIES = [
@@ -573,11 +694,11 @@ PREDICTOR_MODEL_FACTORIES = [
 ]
 
 PREDICTOR_MODEL_NAMES = [
-    "LogisticRegression (sklearn, CPU)",
-    "PyTorch MLP (CPU/GPU demo)",
+    "LogisticRegression (sklearn)",
+    "MLP (PyTorch)",
 ]
 
-# --- Helper Functions (from your example, potentially move to utils) ---
+# --- Helper Functions ---
 
 
 # Basic deep_sizeof approximation (use cautiously)
@@ -637,9 +758,7 @@ def plot_stacked_timings(
         (res.avg_predictor_inference_time or 0) * 1000 for res in experiment_results
     ]
     print(experiment_results[:1])
-    backup_bf = [
-        (res.avg_backup_bf_time or 0) * 1000 for res in experiment_results
-    ]
+    backup_bf = [(res.avg_backup_bf_time or 0) * 1000 for res in experiment_results]
     # Compute the remainder (other) if total latency is higher
     total = [res.avg_total_latency_ns / 1e6 for res in experiment_results]  # ns to ms
     # The sum of known components
@@ -647,7 +766,7 @@ def plot_stacked_timings(
     other = [max(t - k, 0) for t, k in zip(total, known_sum)]
     colors = ["#3498db", "#e74c3c", "#f1c40f", "#2ecc71"]  # blue, yellow, red, green
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(4, 3))
     ax.stackplot(
         batch_sizes,
         pred_data_move,
@@ -666,47 +785,52 @@ def plot_stacked_timings(
     ax.set_xlabel("Batch Size")
     ax.set_ylabel("Time (ms)")
     ax.set_title(experiment_name)
-    ax.legend(loc="upper left")
+    legend = ax.legend(loc="upper left", fancybox=False, edgecolor="black")
+    legend.get_frame().set_linewidth(0.5)
     ax.grid(True, linestyle=":", alpha=0.6)
     plt.tight_layout()
     if save_path:
-        plt.savefig(save_path)
+        plt.savefig(save_path, bbox_inches="tight")
     plt.show()
 
     # --- Log-scale plot ---
-    import os
-    base, ext = os.path.splitext(save_path) if save_path else ("stacked_timings", ".png")
-    log_save_path = f"{base}_log{ext}"
-    fig_log, ax_log = plt.subplots(figsize=(8, 5))
-    ax_log.stackplot(
-        batch_sizes,
-        pred_data_move,
-        pred_infer,
-        backup_bf,
-        other,
-        colors=colors,
-        labels=[
-            "Predictor Data Movement",
-            "Predictor Inference",
-            "Backup BF Query",
-            "Other/Overhead",
-        ],
-        alpha=0.8,
-    )
-    ax_log.set_xlabel("Batch Size")
-    ax_log.set_ylabel("Time (ms)")
-    ax_log.set_title(experiment_name + " (Log Y)")
-    ax_log.set_yscale("log")
-    ax_log.legend(loc="upper left")
-    ax_log.grid(True, linestyle=":", alpha=0.6)
-    plt.tight_layout()
-    if save_path:
-        fig_log.savefig(log_save_path)
-    plt.show()
-    plt.close(fig_log)
+    if plot_log:
+        base, ext = (
+            os.path.splitext(save_path) if save_path else ("stacked_timings", ".png")
+        )
+        log_save_path = f"{base}_log{ext}"
+        fig_log, ax_log = plt.subplots(figsize=(4, 3))
+        ax_log.stackplot(
+            batch_sizes,
+            pred_data_move,
+            pred_infer,
+            backup_bf,
+            other,
+            colors=colors,
+            labels=[
+                "Predictor Data Movement",
+                "Predictor Inference",
+                "Backup BF Query",
+                "Other/Overhead",
+            ],
+            alpha=0.8,
+        )
+        ax_log.set_xlabel("Batch Size")
+        ax_log.set_ylabel("Time (ms)")
+        ax_log.set_title(experiment_name + " (Log Y)")
+        ax_log.set_yscale("log")
+        legend = ax.legend(loc="upper left", fancybox=False, edgecolor="black")
+        legend.get_frame().set_linewidth(0.5)
+        ax_log.grid(True, linestyle=":", alpha=0.6)
+        plt.tight_layout()
+        if save_path:
+            fig_log.savefig(log_save_path, bbox_inches="tight")
+        plt.show()
+        plt.close(fig_log)
 
 
 # --- Main Execution Block ---
+
 
 def main() -> None:
     """Main function to parse arguments, load data, build the specified structure, and run experiments."""
@@ -736,11 +860,11 @@ def main() -> None:
     parser.add_argument(
         "--batch_sizes",
         type=str,
-        default="1,8,64,256,1024",
+        default="1,8,64,128,256,352,384,416,448,480,512,576,640,704,768,832,896,960,1024",
         help="Comma-separated batch sizes",
     )
     parser.add_argument(
-        "--repetitions", type=int, default=20, help="Timing repetitions per batch size"
+        "--repetitions", type=int, default=30, help="Timing repetitions per batch size"
     )
     parser.add_argument("--warmup_reps", type=int, default=5, help="Warmup repetitions")
     parser.add_argument(
@@ -781,7 +905,10 @@ def main() -> None:
         "--k", type=int, help="Final regions (Required for PLBF/FastPLBF)"
     )
     parser.add_argument(
-        "--F", type=float, help="Target overall FPR (Required for PLBF/FastPLBF)"
+        "--F",
+        type=float,
+        default=0.01,
+        help="Target overall FPR (Required for PLBF/FastPLBF)",
     )
     # --use_fast_dp is implicitly handled by structure="FastPLBF"
 
@@ -902,8 +1029,10 @@ def main() -> None:
     if stype in ["PLBF", "FastPLBF", "LBF"]:
         model_idx = results.model
         if model_idx < 0 or model_idx >= len(PREDICTOR_MODEL_FACTORIES):
-            raise ValueError(f"Model index {model_idx} is invalid. Available: 0-{len(PREDICTOR_MODEL_FACTORIES)-1}")
-        print(f"Using predictor model: {PREDICTOR_MODEL_NAMES[model_idx]}")
+            raise ValueError(
+                f"Model index {model_idx} is invalid. Available: 0-{len(PREDICTOR_MODEL_FACTORIES) - 1}"
+            )
+        print(f"Using predictor model: {PREDICTOR_MODEL_NAMES[model_idx]} on device {DEVICE}")
         # Always use both positive and negative samples for predictor training
         train_pred_data = pd.concat([positive_sample, neg_train_pred])
         X_train_pred = train_pred_data["key"]
@@ -1118,13 +1247,20 @@ def main() -> None:
 
         # Optional: Save results
         all_results_df = pd.DataFrame(all_results)
-        all_results_df.to_csv(f"results/{experiment_name}_{results.model}_{results.device}_results.csv", index=False)
+        all_results_df.to_csv(
+            f"results/{experiment_name}_{results.model}_{results.device}_results.csv",
+            index=False,
+        )
 
     else:
         print("No results were collected from the experiment run.")
-    
-    # 3. Plot the results 
-    plot_stacked_timings(all_results, experiment_name, save_path=f"results/{experiment_name}_{results.model}_{results.device}_stacked_timings.png")
+
+    # 3. Plot the results
+    plot_stacked_timings(
+        all_results,
+        experiment_name,
+        save_path=f"results/{experiment_name}_{results.model}_{results.device}_stacked_timings.png",
+    )
 
     print("------------------------------------")
 
