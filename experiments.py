@@ -696,7 +696,7 @@ def make_xgboost_predictor(
     from sklearn.feature_extraction.text import HashingVectorizer
 
     # Vectorize inputs
-    vectorizer = HashingVectorizer(n_features=4096, alternate_sign=False)
+    vectorizer = HashingVectorizer(n_features=512, alternate_sign=False)
     X_feat = vectorizer.transform(X_train)
     xgb_clf = XGBClassifier(use_label_encoder=False, eval_metric="logloss", n_jobs=1)
     param_grid = {"max_depth": [5, 7, 9], "n_estimators": [50, 100], "learning_rate": [0.01,0.1, 0.3]}
