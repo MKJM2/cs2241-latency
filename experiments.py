@@ -687,15 +687,51 @@ def make_pytorch_mlp_predictor(X_train: Iterable[str], y_train: Iterable[float],
     return predictor
 
 
+def make_xgboost_predictor(
+    X_train: Iterable[str], y_train: Iterable[float], device_hint: str = "cpu"
+) -> Predictor:
+    import time
+    from xgboost import XGBClassifier
+    from sklearn.model_selection import GridSearchCV
+    from sklearn.feature_extraction.text import HashingVectorizer
+
+    # Vectorize inputs
+    vectorizer = HashingVectorizer(n_features=4096, alternate_sign=False)
+    X_feat = vectorizer.transform(X_train)
+    xgb_clf = XGBClassifier(use_label_encoder=False, eval_metric="logloss", n_jobs=1)
+    param_grid = {"max_depth": [5, 7, 9], "n_estimators": [50, 100], "learning_rate": [0.01,0.1, 0.3]}
+    grid = GridSearchCV(xgb_clf, param_grid, cv=3, scoring="roc_auc", n_jobs=-1)
+    start_train = time.perf_counter()
+    grid.fit(X_feat, y_train)
+    end_train = time.perf_counter()
+    print(f"[Model 2] XGBoost training took {end_train - start_train:.2f}s, best_params={grid.best_params_}, best_score={grid.best_score_}")
+    model = grid.best_estimator_
+
+    def predictor(keys: Iterable[str]) -> Tuple[List[float], PredictorTimings]:
+        keys_list = list(map(str, keys))
+        timings: PredictorTimings = {"data_movement_time": None, "inference_time": 0.0}
+        if not keys_list:
+            return [], timings
+        with CpuTimer() as inf_timer:
+            X_k = vectorizer.transform(keys_list)
+            probas = model.predict_proba(X_k)
+        timings["inference_time"] = inf_timer.get_elapsed_ns() / NS_PER_S
+        return [float(p) for p in probas[:, 1]], timings
+
+    return predictor
+
+
 # List of model factories
 PREDICTOR_MODEL_FACTORIES = [
     make_logistic_regression_predictor,
     make_pytorch_mlp_predictor,
+    make_xgboost_predictor,
 ]
 
 PREDICTOR_MODEL_NAMES = [
     "LogisticRegression (sklearn)",
     "MLP (PyTorch)",
+    "XGBoost (CPU)",
 ]
 
 # --- Helper Functions ---
