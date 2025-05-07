@@ -517,221 +517,25 @@ class PredictorTimings(TypedDict, total=False):
 Predictor = Callable[[Iterable[str]], Tuple[List[float], PredictorTimings]]
 
 # --- Predictor Model Factories ---
-# Each function returns a predictor function (matching Predictor type) after training on the provided data.
-# The predictor function will handle timing and device logic as needed.
+from models import (
+    make_logistic_regression_predictor,
+    make_pytorch_mlp_predictor,
+    make_xgboost_predictor,
+    make_xgboost_predictor_with_features,
+)
 
-
-def make_logistic_regression_predictor(
-    X_train, y_train, device_hint: str = "cpu"
-) -> Predictor:
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.pipeline import Pipeline
-    from sklearn.feature_extraction.text import HashingVectorizer
-    from sklearn.exceptions import NotFittedError
-    import time
-
-    vectorizer = HashingVectorizer(n_features=4096, alternate_sign=False)
-    model = LogisticRegression(
-        solver="liblinear", random_state=42, class_weight="balanced"
-    )
-    pipe = Pipeline(
-        [
-            ("vectorizer", vectorizer),
-            ("classifier", model),
-        ]
-    )
-    start_pred_train_time = time.time()
-    pipe.fit(X_train, y_train)
-    end_pred_train_time = time.time()
-    print(
-        f"[Model 0] LogisticRegression training took {end_pred_train_time - start_pred_train_time:.2f}s"
-    )
-
-    def predictor(keys: Iterable[str]) -> Tuple[List[float], PredictorTimings]:
-        keys_list = list(map(str, keys))
-        timings: PredictorTimings = {"data_movement_time": None, "inference_time": 0.0}
-        if not keys_list:
-            return [], timings
-        import time
-
-        start_inf = time.perf_counter()
-        probas = pipe.predict_proba(keys_list)
-        timings["inference_time"] = time.perf_counter() - start_inf
-        return probas[:, 1].astype(float).tolist(), timings
-
-    return predictor
-
-
-def make_pytorch_mlp_predictor(X_train: Iterable[str], y_train: Iterable[float], device_hint: str = "cpu") -> Predictor:
-    import torch.nn as nn
-    import torch.optim as optim
-    import hashlib
-
-    # Dummy example: one-hot encode input strings by hash, simple MLP
-    def simple_hash_vec(keys, n_features=4096):
-        arr = np.zeros((len(keys), n_features), dtype=np.float32)
-        for i, k in enumerate(keys):
-            # use deterministic hash for stable cache key
-            digest = hashlib.sha256(k.encode()).digest()
-            idx = int.from_bytes(digest, "big") % n_features
-            arr[i, idx] = 1.0
-        return arr
-
-    X_np = simple_hash_vec(X_train)
-    y_np = np.array(y_train, dtype=np.float32)
-    device = torch.device(
-        "cuda" if device_hint == "cuda" and torch.cuda.is_available() else "cpu"
-    )
-
-    class MLP(nn.Module):
-        def __init__(self, n_features: int):
-            super().__init__()
-            self.fc1 = nn.Linear(n_features, 64)
-            self.relu = nn.ReLU()
-            self.fc2 = nn.Linear(64, 1)
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            x = self.fc1(x)
-            x = self.relu(x)
-            x = self.fc2(x)
-            return x
-
-    n_features = 4096
-    # --- Caching logic start ---
-    cache_dir = "_models"
-    os.makedirs(cache_dir, exist_ok=True)
-    # Hash the training data and model config for cache key
-    def get_cache_key(X_np: np.ndarray, y_np: np.ndarray, n_features: int) -> str:
-        m = hashlib.sha256()
-        m.update(X_np.tobytes())
-        m.update(y_np.tobytes())
-        m.update(str(n_features).encode())
-        return m.hexdigest()
-    cache_key = get_cache_key(X_np, y_np, n_features)
-    cache_path = os.path.join(cache_dir, f"mlp_{cache_key}.pt")
-    model = MLP(n_features=n_features).to(device)
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    if os.path.exists(cache_path):
-        print(f"[Model 1] Loading cached PyTorch MLP from {cache_path}")
-        checkpoint = torch.load(cache_path, map_location=device)
-        model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
-    else:
-        # All data starts off at the CPU, since we intend to measure the data movement cost
-        # to the GPU!
-        X_tensor = torch.tensor(X_np, dtype=torch.float32, device="cpu")
-        y_tensor = torch.tensor(y_np, dtype=torch.float32, device="cpu").view(-1, 1)
-
-        # We use a DataLoader for mini-batching
-        # (my poor GTX1050 can't handle the full dataset at once since it has <4GB VRAM)
-        batch_size = 1024
-        dataset = TensorDataset(X_tensor, y_tensor)
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        epochs: int = 10  # keep epochs low for demo
-        print(f"[Model Factory] Training PyTorch MLP on device {device} for {epochs} epochs.")
-        start_pred_train_time = time.time()
-        for epoch in range(epochs):
-            model.train()
-            epoch_loss = 0.0
-            for batch_X, batch_y in dataloader:
-                batch_X = batch_X.to(device)
-                batch_y = batch_y.to(device)
-                optimizer.zero_grad()
-                outputs = model(batch_X)
-                loss = criterion(outputs, batch_y)
-                loss.backward()
-                optimizer.step()
-                epoch_loss += loss.item()
-            print(f"Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss / len(dataloader):.4f}")
-        end_pred_train_time = time.time()
-        print(f"[Model Factory] PyTorch MLP training took {end_pred_train_time - start_pred_train_time:.2f}s")
-        torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict()}, cache_path)
-        print(f"[Model Factory] Saved model to cache: {cache_path}")
-
-    def predictor(keys: Iterable[str]) -> Tuple[List[float], PredictorTimings]:
-        keys_list = list(map(str, keys))
-        timings: PredictorTimings = {"data_movement_time": None, "inference_time": 0.0}
-        if not keys_list:
-            return [], timings
-        # In the sklearn predictor equivalent, the feature engineering (hashvectorizer)
-        # is counted into the 'inference' time, since we measure the inference of the entire
-        # pipeline. We need to count it in here as well, for fairness sake
-        with CpuTimer() as feature_timer:
-            X_np = simple_hash_vec(keys_list)
-            X_tensor_cpu = torch.tensor(X_np, dtype=torch.float32, device="cpu")
-        timings["inference_time"] = feature_timer.get_elapsed_ns() / NS_PER_S
-        if device.type == "cuda":
-            # Benchmark data movement to GPU
-            with CudaTimer(device=device) as data_timer:
-                X_tensor = X_tensor_cpu.to(device)
-            timings["data_movement_time"] = data_timer.get_elapsed_ns() / NS_PER_S
-            with CudaTimer(device=device) as inf_timer:
-                with torch.no_grad():
-                    logits = model(X_tensor)
-                    probs = torch.sigmoid(logits)
-            timings["inference_time"] += inf_timer.get_elapsed_ns() / NS_PER_S
-            with CudaTimer(device=device) as data_back_timer:
-                probs = probs.cpu().numpy().flatten()
-            timings["data_movement_time"] += data_back_timer.get_elapsed_ns() / NS_PER_S
-        else:
-            with CpuTimer() as inf_timer:
-                with torch.no_grad():
-                    logits = model(X_tensor_cpu)
-                    probs = torch.sigmoid(logits).cpu()
-            timings["inference_time"] += inf_timer.get_elapsed_ns() / NS_PER_S
-            # The below should be capture by the "Other/Overhead" category in the graphs
-            probs = probs.numpy().flatten()
-        return probs.tolist(), timings
-
-    return predictor
-
-
-def make_xgboost_predictor(
-    X_train: Iterable[str], y_train: Iterable[float], device_hint: str = "cpu"
-) -> Predictor:
-    import time
-    from xgboost import XGBClassifier
-    from sklearn.model_selection import GridSearchCV
-    from sklearn.feature_extraction.text import HashingVectorizer
-
-    # Vectorize inputs
-    vectorizer = HashingVectorizer(n_features=512, alternate_sign=False)
-    X_feat = vectorizer.transform(X_train)
-    xgb_clf = XGBClassifier(use_label_encoder=False, eval_metric="logloss", n_jobs=1)
-    param_grid = {"max_depth": [5, 7, 9], "n_estimators": [50, 100], "learning_rate": [0.01,0.1, 0.3]}
-    grid = GridSearchCV(xgb_clf, param_grid, cv=3, scoring="roc_auc", n_jobs=-1)
-    start_train = time.perf_counter()
-    grid.fit(X_feat, y_train)
-    end_train = time.perf_counter()
-    print(f"[Model 2] XGBoost training took {end_train - start_train:.2f}s, best_params={grid.best_params_}, best_score={grid.best_score_}")
-    model = grid.best_estimator_
-
-    def predictor(keys: Iterable[str]) -> Tuple[List[float], PredictorTimings]:
-        keys_list = list(map(str, keys))
-        timings: PredictorTimings = {"data_movement_time": None, "inference_time": 0.0}
-        if not keys_list:
-            return [], timings
-        with CpuTimer() as inf_timer:
-            X_k = vectorizer.transform(keys_list)
-            probas = model.predict_proba(X_k)
-        timings["inference_time"] = inf_timer.get_elapsed_ns() / NS_PER_S
-        return [float(p) for p in probas[:, 1]], timings
-
-    return predictor
-
-
-# List of model factories
 PREDICTOR_MODEL_FACTORIES = [
     make_logistic_regression_predictor,
     make_pytorch_mlp_predictor,
     make_xgboost_predictor,
+    make_xgboost_predictor_with_features,
 ]
 
 PREDICTOR_MODEL_NAMES = [
     "LogisticRegression (sklearn)",
     "MLP (PyTorch)",
     "XGBoost (CPU)",
+    "XGBoost (with features)",
 ]
 
 # --- Helper Functions ---
