@@ -159,7 +159,10 @@ def make_pytorch_mlp_predictor(
                 logits = model(X_gpu)
                 probs = torch.sigmoid(logits)
             timings["inference_time"] += time.perf_counter() - inf_start
-            probs = probs.cpu().numpy().flatten()
+            dm_start = time.perf_counter()
+            probs = probs.cpu()
+            timings["data_movement_time"] += time.perf_counter() - dm_start
+            probs = probs.numpy().flatten()
         else:
             inf_start = time.perf_counter()
             with torch.no_grad():

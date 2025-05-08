@@ -185,3 +185,8 @@ _models
 _models/
 _models/*
 _models/*/
+
+# Cached symbolic model fitted submodels:
+_bench
+_bench/
+_bench/*

@@ -637,7 +637,7 @@ def plot_stacked_timings(
     )
     ax.set_xlabel("Batch Size")
     ax.set_ylabel("Time (ms)")
-    ax.set_title(experiment_name)
+    # ax.set_title(experiment_name)
     legend = ax.legend(loc="upper left", fancybox=False, edgecolor="black")
     legend.get_frame().set_linewidth(0.5)
     ax.grid(True, linestyle=":", alpha=0.6)
