@@ -99,11 +99,9 @@ def make_pytorch_mlp_predictor(
     def get_cache_key(
         X_arr: np.ndarray, y_arr: np.ndarray, n_feats: int
     ) -> str:
-        m = hashlib.sha256()
-        m.update(X_arr.tobytes())
-        m.update(y_arr.tobytes())
-        m.update(str(n_feats).encode())
-        return m.hexdigest()
+        # Fast metadata-based key: use array shapes, dtypes, and feature count
+        meta = f"{X_arr.shape}_{y_arr.shape}_{n_feats}_{X_arr.dtype}_{y_arr.dtype}"
+        return hashlib.sha256(meta.encode()).hexdigest()
 
     cache_key = get_cache_key(X_np, y_np, n_features)
     cache_path = os.path.join(cache_dir, f"mlp_{cache_key}.pt")
