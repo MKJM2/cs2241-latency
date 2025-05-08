@@ -29,7 +29,9 @@ from sklearn.pipeline import Pipeline
 from sklearn.exceptions import NotFittedError
 from sklearn.ensemble import RandomForestClassifier
 
-from bloom_filter import BloomFilter
+from rbloom import Bloom
+from bloom_filter import BloomFilter as PyBloomFilter
+from bloomfilter import BloomFilter
 from fast_plbf import FastPLBF
 # TODO: from learned_bloom_filter import LearnedBloomFilter
 
@@ -347,13 +349,24 @@ class ExperimentRunner:
         if self.neg_keys_test:
             logging.info("Calculating False Positive Rate...")
             try:
-                fp_results = self.query_method(self.neg_keys_test)
-                fp_count = sum(
-                    fp_results
-                )  # Assumes query_method returns list/array of bool/int
-                measured_fpr = fp_count / len(self.neg_keys_test)
+                # Process in batches to avoid OOM
+                batch_size = 1024  # Adjust based on your GPU memory
+                total_fp_count = 0
+                total_processed = 0
+                
+                for i in range(0, len(self.neg_keys_test), batch_size):
+                    batch = self.neg_keys_test[i:i + batch_size]
+                    if not batch:
+                        continue
+                        
+                    fp_results = self.query_method(batch)
+                    batch_fp_count = sum(fp_results)
+                    total_fp_count += batch_fp_count
+                    total_processed += len(batch)
+                    
+                measured_fpr = total_fp_count / total_processed if total_processed > 0 else 0.0
                 logging.info(
-                    f"Measured FPR: {measured_fpr:.6f} ({fp_count}/{len(self.neg_keys_test)})"
+                    f"Measured FPR: {measured_fpr:.6f} ({total_fp_count}/{total_processed})"
                 )
             except Exception as e:
                 logging.warning(f"Could not calculate FPR: {e}", exc_info=True)
@@ -927,7 +940,7 @@ def main() -> None:
             print(
                 f"  Building backup Bloom Filter (Cap={bf_capacity}, Err={bf_error_rate})"
             )
-            backup_bf = BloomFilter[str](capacity=bf_capacity, error_rate=bf_error_rate)
+            backup_bf = BloomFilter(bf_capacity, bf_error_rate)
             # Populate with *all* positive keys (common LBF assumption)
             for key in pos_keys:
                 backup_bf.add(key)
@@ -951,8 +964,8 @@ def main() -> None:
 
             # Create and populate the Bloom Filter
             print(f"  Building Bloom Filter (Cap={bf_capacity}, Err={bf_error_rate})")
-            bf_instance = BloomFilter[str](
-                capacity=bf_capacity, error_rate=bf_error_rate
+            bf_instance = BloomFilter(
+                bf_capacity, bf_error_rate
             )
             # Populate with *all* positive keys
             for key in pos_keys:

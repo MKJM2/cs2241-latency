@@ -150,12 +150,24 @@ class BloomFilter(Generic[KeyType]):
         return size, num_hashes
 
     def _get_indices(self, item_bytes: bytes) -> List[int]:
-        """Generates k indices using double hashing with xxhash on bytes."""
+        """
+        Generates k indices using enhanced double hashing with xxhash on bytes.
+
+        See https://github.com/facebook/rocksdb/issues/4120,
+        http://peterd.org/pcd-diss.pdf as well as Kirsch-Mitzenmacher
+        optimization for double hashing.
+
+        Args:
+            item_bytes: The serialized item in bytes.
+        Returns:
+            A list of k indices for the bit array.
+        """
         h1: int = self._hasher1_intdigest(item_bytes)
         h2: int = self._hasher2_intdigest(item_bytes)
         m: int = self.size
+        num_hashes: int = self.num_hashes
         # Generate k indices using Kirsch-Mitzenmacher optimization
-        return [(h1 + i * h2) % m for i in range(self.num_hashes)]
+        return [(h1 + i * h2 + (i * (i - 1) // 2)) % m for i in range(num_hashes)]
 
     def _add_indices(self, indices: List[int]) -> None:
         """Sets the bits at the given indices in the bit array."""

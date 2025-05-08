@@ -24,7 +24,11 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.exceptions import NotFittedError
 
-from bloom_filter import BloomFilter, Serializer
+# from rbloom import Bloom
+from bloom_filter import BloomFilter as PyBloomFilter
+from bloom_filter import Serializer
+from bloomfilter import BloomFilter
+from timers import NS_PER_S
 from utils import deep_sizeof, sizeof
 
 
@@ -940,14 +944,14 @@ class PLBF(Generic[KeyType]):
             else:
                 # Standard case: Create and populate a Bloom filter
                 try:
-                    bf = BloomFilter[KeyType](
-                        capacity=count_i, error_rate=fpr_i, serializer=self._serializer
+                    bf = BloomFilter(
+                        count_i, fpr_i
                     )
                     for key in keys_per_region[i]:
                         bf.add(key)
                     self.bfs[i] = bf
                 except Exception as e:
-                    print(f"Error creating BloomFilter for region {i}: {e}")
+                    print(f"Error creating Bloom for region {i}: {e}")
                     self.bfs[i] = None  # Failed to create filter
 
     def contains(self, key: KeyType) -> bool:
@@ -969,7 +973,7 @@ class PLBF(Generic[KeyType]):
 
         region_idx: int = self._get_region_idx(score)
         fpr_i: Optional[float] = self.f[region_idx]
-        bf: Optional[BloomFilter[KeyType]] = self.bfs[region_idx]
+        bf: Optional[Bloom[KeyType]] = self.bfs[region_idx]
         # Time the backup BF query
         start_bf = time.perf_counter()
         if fpr_i is None:
@@ -995,6 +999,7 @@ class PLBF(Generic[KeyType]):
             result = bf is not None and key in bf
         end_bf = time.perf_counter()
         self._last_backup_bf_time = end_bf - start_bf
+        # self._last_backup_bf_time = bf.last_contains_time_ns / NS_PER_S
         self._last_backup_bf_times_batch = None
         return result
 
@@ -1021,7 +1026,7 @@ class PLBF(Generic[KeyType]):
             assert 0.0 <= score <= 1.0, f"Predictor score out of bounds: {score}"
             region_idx: int = self._get_region_idx(score)
             fpr_i: Optional[float] = self.f[region_idx]
-            bf: Optional[BloomFilter[KeyType]] = self.bfs[region_idx]
+            bf: Optional[Bloom[KeyType]] = self.bfs[region_idx]
             start_bf = time.perf_counter()
             if fpr_i is None:
                 # Invalid config, fail-safe to True
@@ -1035,6 +1040,7 @@ class PLBF(Generic[KeyType]):
                 results.append(bf is not None and key in bf)
             end_bf = time.perf_counter()
             bf_times.append(end_bf - start_bf)
+            # bf_times.append(bf.last_contains_time_ns / NS_PER_S)
 
         self._last_backup_bf_time = sum(bf_times)
         self._last_backup_bf_times_batch = bf_times
